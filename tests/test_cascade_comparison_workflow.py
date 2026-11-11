@@ -38,7 +38,7 @@ from harl.runners.on_policy_ma_runner import OnPolicyMARunner
 
 def comparison_options(**changes):
     values = dict(algorithms=['happo', 'mappo'], episode_log=None, no_plot=True,
-        check_data_only=False, xld_diagnostics=False, trajectory_diagnostics=False,
+        check_data_only=False, trajectory_diagnostics=False,
         save_checkpoints=False, skip_final_evaluation=True, plot_python=sys.executable)
     values.update(changes)
     return SimpleNamespace(**values)
@@ -161,34 +161,20 @@ class ComparisonDispatchTest(unittest.TestCase):
         for call in helper.call_args_list:
             self.assertEqual(call.args[2]['algo']['gamma'], .75)
 
-    def test_cli_enables_xld_diagnostics_for_both_algorithms_without_run_files(self):
-        original_directory = Path.cwd()
-        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
-            directory = Path(directory)
-            stack.enter_context(mock.patch.object(
-                cli, 'CascadeData', return_value=mock.sentinel.data))
-            helper = stack.enter_context(mock.patch.object(compare, 'run_parallel_experiment',
-                side_effect=lambda *args, **kwargs: {'algorithm': kwargs['algorithm_name']}))
-            stack.enter_context(mock.patch.object(compare, 'validate_comparison',
-                                                   side_effect=lambda value: value))
-            plots = stack.enter_context(mock.patch.object(compare.subprocess, 'run'))
-            stack.enter_context(redirect_stdout(io.StringIO()))
-            os.chdir(directory)
-            try:
-                result = compare.main(['--xld-diagnostics', '--no-plot',
-                                       '--skip-final-evaluation'])
-            finally:
-                os.chdir(original_directory)
-            self.assertEqual([row['algorithm'] for row in result['runs']], ['happo', 'mappo'])
-            self.assertEqual(helper.call_count, 2)
-            for call in helper.call_args_list:
-                self.assertTrue(call.args[2]['experiment']['xld_diagnostics'])
-                self.assertTrue(call.args[3].xld_diagnostics)
-                self.assertIsNone(call.args[3].episode_log)
-                self.assertFalse(call.args[3].save_checkpoints)
-                self.assertFalse(call.args[3].trajectory_diagnostics)
-            self.assertEqual(list(directory.iterdir()), [])
-            plots.assert_not_called()
+    def test_cli_ecological_scale_reaches_both_algorithms_without_run_files(self):
+        with mock.patch.object(cli, 'CascadeData', return_value=mock.sentinel.data), \
+                mock.patch.object(compare, 'run_parallel_experiment',
+                    side_effect=lambda *args, **kwargs: {'algorithm': kwargs['algorithm_name']}) as helper, \
+                mock.patch.object(compare, 'validate_comparison'), \
+                redirect_stdout(io.StringIO()):
+            compare.main(['--ecological-flow-scale', '.5', '--no-plot',
+                          '--skip-final-evaluation'])
+        self.assertEqual(helper.call_count, 2)
+        for call in helper.call_args_list:
+            self.assertEqual(call.args[1]['ecological_flow_scale'], .5)
+            self.assertIsNone(call.args[3].episode_log)
+            self.assertFalse(call.args[3].save_checkpoints)
+            self.assertFalse(call.args[3].trajectory_diagnostics)
 
     def test_each_algorithm_receives_fresh_settings_and_separate_output_paths(self):
         config, physical = cli.load_configuration()
@@ -204,7 +190,7 @@ class ComparisonDispatchTest(unittest.TestCase):
             # A mutation by one algorithm must not contaminate its competitor
             # or the caller's configuration, including nested lists/mappings.
             received_config['model']['hidden_sizes'][0] = -1
-            received_physical['reward_penalties']['guaranteed_output_violation_weight'] = 999.
+            received_physical['reward_penalties']['ecological_flow_weight'] = 999.
             return dict(algorithm=kwargs['algorithm_name'])
 
         with tempfile.TemporaryDirectory() as directory:
@@ -309,8 +295,7 @@ class ShortComparisonIntegrationTest(unittest.TestCase):
         cls.config['model'].update(hidden_sizes=[8, 8], action_bins=7)
         cls.config['algo'].update(ppo_epoch=1, critic_epoch=1)
         cls.config['experiment'].update(episodes=2, seeds=[1, 2, 3], diagnostics=False,
-            trajectory_diagnostics=False, save_checkpoints=False, checkpoint_interval=0,
-            xld_diagnostics=False)
+            trajectory_diagnostics=False, save_checkpoints=False, checkpoint_interval=0)
         cls.data = CascadeData(ROOT/'data/cascade_reservoir_new', cls.physical,
                                cls.config['experiment'])
         cls.windows = select_periodic_windows(cls.data, episode_days=4)
@@ -434,9 +419,8 @@ class ShortComparisonIntegrationTest(unittest.TestCase):
 
     def test_three_paired_seeds_return_complete_histories_without_run_files(self):
         config = copy.deepcopy(self.config)
-        config['experiment']['xld_diagnostics'] = True
         config_before, physical_before = copy.deepcopy(config), copy.deepcopy(self.physical)
-        options = comparison_options(xld_diagnostics=True)
+        options = comparison_options()
         original_directory = Path.cwd()
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
             directory = Path(directory)
@@ -486,7 +470,6 @@ class ShortComparisonIntegrationTest(unittest.TestCase):
                     self.assertEqual(history[0]['seed'], seed)
                     self.assertEqual(history[0]['training_steps'], 8)
                     self.assertEqual(history[0]['completed_episodes'], 2)
-                    self.assertNotIn('xld_dispatch_diagnostics', history[0])
                     self.assertEqual([row['evaluation_round'] for row in evaluations], [0, 1])
                     self.assertTrue(all(row['gamma'] == .995 for row in evaluations))
                     self.assertTrue(all(row['status'] == 'ok' for row in evaluations))
@@ -495,60 +478,20 @@ class ShortComparisonIntegrationTest(unittest.TestCase):
                         assert_learning_provenance(self, evaluation, algorithm)
                         for window in evaluation['windows']:
                             assert_learning_provenance(self, window, algorithm)
-                    self.assertTrue(all('xld_dispatch_diagnostics' not in window
-                                        for window in evaluations[0]['windows']))
-                    for window in evaluations[-1]['windows']:
-                        diagnostic = window['xld_dispatch_diagnostics']
-                        guaranteed = window['service_shortfalls']['guaranteed_output']
-                        self.assertEqual(diagnostic['seed'], seed)
-                        self.assertEqual(diagnostic['evaluation_round'], 1)
-                        self.assertEqual(diagnostic['completed_steps'], 4)
-                        self.assertEqual(diagnostic['violation_count'],
-                                         guaranteed['by_reservoir_days'][2])
-                        self.assertEqual(diagnostic['active_days'],
-                                         guaranteed['by_reservoir_active_days'][2])
-                        self.assertEqual(sum(diagnostic['classification_counts'].values()),
-                                         diagnostic['completed_steps'])
-                        self.assertEqual(sum(value for name, value in
-                            diagnostic['classification_counts'].items()
-                            if name not in ('no_violation', 'requirement_inactive')),
-                            diagnostic['violation_count'])
-                final_windows = [window for evaluations in payload['evaluation_histories']
-                                 for window in evaluations[-1]['windows']]
-                final_diagnostics = [window['xld_dispatch_diagnostics']
-                                     for window in final_windows]
-                summary = payload['xld_dispatch_summary']
-                self.assertIsNone(summary['held_out'])
-                fixed = summary['fixed_training_windows']
-                self.assertEqual(fixed['status'], 'ok')
-                self.assertEqual(fixed['phase'], 'training_evaluation')
-                self.assertEqual(fixed['component_count'], 9)
-                self.assertEqual(fixed['completed_steps'], 36)
-                self.assertEqual(fixed['seeds'], [1, 2, 3])
-                self.assertEqual(fixed['evaluation_rounds'], [1])
-                for name in ('active_days', 'violation_count'):
-                    self.assertEqual(fixed[name], sum(row[name] for row in final_diagnostics))
-                self.assertEqual(fixed['violation_count'], sum(
-                    window['service_shortfalls']['guaranteed_output']['by_reservoir_days'][2]
-                    for window in final_windows))
-                expected_classes = {name: sum(row['classification_counts'][name]
-                                             for row in final_diagnostics)
-                                    for name in final_diagnostics[0]['classification_counts']}
-                self.assertEqual(fixed['classification_counts'], expected_classes)
-                expected_groups = dict(
-                    actor_missed_feasible_discrete=expected_classes['same_day_policy_alternative'],
-                    discrete_grid_gap=expected_classes['discrete_grid_gap'],
-                    same_state_continuous_unattainable=sum(expected_classes[name] for name in (
-                        'same_state_capacity_limit', 'same_state_water_limit',
-                        'same_state_dispatch_limit', 'same_state_head_limit')))
-                self.assertEqual(fixed['group_counts'], expected_groups)
-                self.assertEqual(sum(fixed['group_counts'].values()), fixed['violation_count'])
-                self.assertEqual(fixed['violation_rate'],
-                                 fixed['violation_count']/fixed['active_days'])
-                for name, count in expected_groups.items():
-                    self.assertEqual(fixed['group_fractions_among_violations'][name],
-                                     count/fixed['violation_count']
-                                     if fixed['violation_count'] else None)
+                    for evaluation in evaluations:
+                        expected_violations = 0
+                        expected_active = 0
+                        for window in evaluation['windows']:
+                            self.assertEqual(set(window['service_shortfalls']), {'ecological_flow'})
+                            ecological = window['service_shortfalls']['ecological_flow']
+                            self.assertEqual(window['ecological_flow_violation_count'],
+                                             ecological['reservoir_day_count'])
+                            expected_violations += ecological['reservoir_day_count']
+                            expected_active += ecological['active_reservoir_days']
+                        self.assertEqual(evaluation['ecological_flow_violation_count'], expected_violations)
+                        self.assertEqual(evaluation['ecological_flow_active_reservoir_days'], expected_active)
+                        self.assertEqual(evaluation['ecological_flow_violation_rate'],
+                                         expected_violations/expected_active)
         for left, right in zip(happo['histories'], mappo['histories']):
             self.assertEqual(left[0]['window_start_year'], right[0]['window_start_year'])
         # Returned results must be ordinary detached data, not live workers,
@@ -591,11 +534,9 @@ class HAPPOSharedTeamAdvantageTest(unittest.TestCase):
 
     def test_team_reward_uses_global_generation_once_and_mappo_keeps_own_rewards(self):
         data = SimpleNamespace(power_cap=np.array([100., 200., 300., 400., 500.]),
-            service_requirements=SimpleNamespace(guaranteed_output_mw=np.full(5, 10.),
-                                                 ecological_flow_m3s=np.full(5, 5.)))
+            service_requirements=SimpleNamespace(ecological_flow_m3s=np.full(5, 5.)))
         settings = reward_settings(dict(reward_penalties=dict(enabled=True,
-            guaranteed_output_weight=1., ecological_flow_weight=1.,
-            guaranteed_output_violation_weight=1.)))
+            ecological_flow_weight=1.)))
         power = np.array([5., 80., 90., 100., 150.])
         transition = dict(power=power.copy(), release=np.array([2., 6., 8., 9., 10.]),
                           reward=float(power.sum()/data.power_cap.sum()))

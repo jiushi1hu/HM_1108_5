@@ -53,7 +53,7 @@ def system_rewards_from_dispatch(operation_reward, dispatch):
     if settings['enabled']:
         if getattr(operation_reward, 'requirements', None) is None:
             raise ValueError('Counterfactual service penalties require loaded requirements')
-        for term, actual in (('guaranteed_output', power), ('ecological_flow', release)):
+        for term, actual in (('ecological_flow', release),):
             threshold = _finite_array(operation_reward.thresholds[term], (5,), term+' threshold')
             if (threshold < 0.).any():
                 raise ValueError('Service thresholds must be nonnegative')
@@ -61,8 +61,6 @@ def system_rewards_from_dispatch(operation_reward, dispatch):
             shortfall = np.where(shortfall > 1e-10*np.maximum(threshold, 1.), shortfall, 0.)
             relative = np.divide(shortfall, threshold, out=np.zeros_like(shortfall), where=threshold > 0.)
             local = local-settings[term+'_weight']*relative
-            if term == 'guaranteed_output':
-                local = local-settings.get('guaranteed_output_violation_weight', 0.)*(shortfall > 0.)
     result = .5*local.sum(axis=1)+.5*power.sum(axis=1)/capacity.sum()
     if not np.isfinite(result).all():
         raise FloatingPointError('Non-finite counterfactual shared-system rewards')

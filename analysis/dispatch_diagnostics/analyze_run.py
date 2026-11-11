@@ -1,4 +1,4 @@
-"""Replay saved final policies and diagnose same-state service attainability.
+"""Replay saved final policies and diagnose same-state ecological-flow attainability.
 
 This analysis lives outside harl/examples so it cannot change the implementation
 fingerprint required by existing inference checkpoints. No training occurs.
@@ -75,7 +75,7 @@ def verify_replay(summary, reference, *, periodic):
         if left.shape != right.shape or not np.allclose(left, right, rtol=1e-12, atol=1e-9):
             raise AssertionError('Frozen replay does not reproduce original '+original)
         maximum = max(maximum, float(np.max(np.abs(left-right))))
-    for term in ('guaranteed_output', 'ecological_flow'):
+    for term in ('ecological_flow',):
         for key in ('reservoir_day_count', 'active_reservoir_days', 'by_reservoir_days'):
             if summary['service_shortfalls'][term][key] != reference['service_shortfalls'][term][key]:
                 raise AssertionError('Frozen replay service counts differ: '+term+' '+key)

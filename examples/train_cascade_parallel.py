@@ -10,8 +10,6 @@ from harl.envs.cascade_reservoir.periodic_evaluation import (
     PERIODIC_EVALUATION_DAYS, select_periodic_windows)
 from harl.envs.cascade_reservoir.training_metrics import log_episode, StepMetricsWriter, STEP_METRIC_FIELDS
 from harl.envs.cascade_reservoir.training_sampler import TrainingWindowSampler, validate_sampling_mode
-from harl.envs.cascade_reservoir.xld_diagnostics import (
-    XLDDispatchWriter, XLD_DIAGNOSTIC_FIELDS, aggregate_xld_summaries)
 from harl.envs.cascade_reservoir.trajectory_diagnostics import (
     TrajectoryDiagnosticsWriter, TRAJECTORY_DIAGNOSTIC_FIELDS)
 from harl.runners.cascade_reservoir_runner import (
@@ -27,14 +25,6 @@ def step_metrics_paths(episode_log, seeds):
         return {}
     path=Path(episode_log)
     return {seed:path.with_name(path.stem+'_seed'+str(seed)+'_steps.csv') for seed in seeds}
-
-
-def xld_dispatch_paths(episode_log, seeds, enabled=False):
-    """One compact final-policy XLD diagnostic table per seed."""
-    if not enabled or episode_log is None:
-        return {}
-    path=Path(episode_log)
-    return {seed:path.with_name(path.stem+'_seed'+str(seed)+'_xld_dispatch.csv') for seed in seeds}
 
 
 def plot_output_paths(episode_log=None, plot_output=None):
@@ -80,52 +70,6 @@ def check_episode_inputs(data,physical,years,days,bins):
         raise ValueError('Episode observation dimensions do not match the configured layout')
 
 
-def _final_xld_summary(runners, evaluations, algorithm, skip_final_evaluation):
-    """Pool final-policy XLD counts, keeping training scenarios and held-out apart."""
-    final_rounds=[runner.periodic_evaluation_history[-1] for runner in runners]
-    fixed_summaries=[row.get('xld_dispatch_diagnostics') for row in final_rounds]
-    if (all(row.get('status')=='ok' for row in final_rounds) and
-            all(summary is not None for summary in fixed_summaries)):
-        fixed=aggregate_xld_summaries(fixed_summaries)
-    else:
-        fixed=dict(status='incomplete',expected_seed_count=len(runners),
-            complete_seed_count=sum(summary is not None for summary in fixed_summaries),
-            message='Final fixed-window diagnosis is incomplete; no pooled rate is reported.')
-    held_out=None
-    if not skip_final_evaluation:
-        if len(evaluations)!=len(runners) or any('xld_dispatch_diagnostics' not in row for row in evaluations):
-            held_out=dict(status='incomplete',
-                message='Held-out diagnosis is incomplete; no pooled rate is reported.')
-        else:
-            summaries=[dict(row['xld_dispatch_diagnostics'], status='ok',
-                            episode_horizon_days=row['episode_horizon_days']) for row in evaluations]
-            held_out=aggregate_xld_summaries(summaries)
-    result=dict(fixed_training_windows=fixed,held_out=held_out)
-    labels=dict(actor_missed_feasible_discrete='A meeting discrete command existed but was not selected',
-                discrete_grid_gap='Only a continuous command could meet the requirement (grid gap)',
-                same_state_continuous_unattainable='No continuous command could meet it in the reached state')
-    for scope, summary in result.items():
-        if summary is None:
-            continue
-        if summary['status']!='ok':
-            print('XLD {} | {}: {}'.format(algorithm.upper(),scope,summary['message']),flush=True)
-            continue
-        rate=summary['violation_rate']
-        print('XLD {} | {} | violations={}/{} ({})'.format(algorithm.upper(),scope,
-            summary['violation_count'],summary['active_days'],
-            'N/A' if rate is None else '{:.2%}'.format(rate)),flush=True)
-        for group,label in labels.items():
-            fraction=summary['group_fractions_among_violations'][group]
-            print('  {}: {} ({} of XLD violation days)'.format(label,summary['group_counts'][group],
-                'N/A' if fraction is None else '{:.2%}'.format(fraction)),flush=True)
-        limits={key:value for key,value in summary['classification_counts'].items()
-                if key.startswith('same_state_')}
-        print('  Current-state limit categories: '+json.dumps(limits,sort_keys=True),flush=True)
-        print('  Scope: same starting state and other reservoirs\' commands; '
-              'this does not assess future water value or global inevitability.',flush=True)
-    return result
-
-
 def run_parallel_experiment(data,physical,config,args,*,runner_cls=CascadeReservoirRunner,
                             algorithm_name=None):
     if algorithm_name is not None:
@@ -149,11 +93,6 @@ def run_parallel_experiment(data,physical,config,args,*,runner_cls=CascadeReserv
         raise ValueError('happo_credit_assignment must be team_gae or counterfactual')
     if credit_mode == 'counterfactual' and getattr(runner_cls,'algorithm_name','happo') != 'happo':
         raise ValueError('Counterfactual credit is a HAPPO-only variant')
-    xld_enabled=config['experiment'].get('xld_diagnostics',False)
-    if not isinstance(xld_enabled,bool):
-        raise ValueError('xld_diagnostics must be a boolean')
-    if xld_enabled and data.service_requirements is None:
-        raise ValueError('XLD diagnostics require loaded service requirements')
     trajectory_enabled=config['experiment'].get('trajectory_diagnostics',False)
     checkpoints_enabled=config['experiment'].get('save_checkpoints',False)
     if not isinstance(trajectory_enabled,bool) or not isinstance(checkpoints_enabled,bool):
@@ -165,7 +104,6 @@ def run_parallel_experiment(data,physical,config,args,*,runner_cls=CascadeReserv
             checkpoint_interval < 0 or (checkpoint_interval and not checkpoints_enabled)):
         raise ValueError('checkpoint_interval must be nonnegative and requires checkpoint output when positive')
     daily_paths=step_metrics_paths(args.episode_log,config['experiment']['seeds'])
-    xld_paths=xld_dispatch_paths(args.episode_log,config['experiment']['seeds'],xld_enabled)
     trajectory_paths=trajectory_diagnostics_paths(args.episode_log,config['experiment']['seeds'],trajectory_enabled)
     checkpoint_dirs=checkpoint_directories(args.episode_log,config['experiment']['seeds'],checkpoints_enabled)
     credit_paths=counterfactual_credit_paths(args.episode_log,config['experiment']['seeds'],credit_mode=='counterfactual')
@@ -173,7 +111,7 @@ def run_parallel_experiment(data,physical,config,args,*,runner_cls=CascadeReserv
         args.episode_log, getattr(args, 'plot_output', None))
     periodic_windows=select_periodic_windows(data)
     output_paths=(([] if args.episode_log is None else [args.episode_log])+
-                  list(daily_paths.values())+list(xld_paths.values())+list(figure_paths.values())+
+                  list(daily_paths.values())+list(figure_paths.values())+
                   list(trajectory_paths.values())+list(checkpoint_dirs.values())+list(credit_paths.values()))
     if len({path.resolve() for path in output_paths}) != len(output_paths):
         raise ValueError('Experiment output paths must be distinct')
@@ -231,9 +169,8 @@ def run_parallel_experiment(data,physical,config,args,*,runner_cls=CascadeReserv
             config['train']['use_valuenorm']),
         learning_reward_architecture=dict(alpha=0.5,
             actor_reward='0.5 * own local reward + 0.5 * global generation reward',
-            local_reward='own power / installed capacity - own weighted relative service deficits '
-                '- guaranteed_output_violation_weight * own guaranteed-output violation indicator; '
-                'all service costs are disabled when reward penalties are disabled',
+            local_reward='own power / installed capacity - own weighted relative ecological-flow deficit; '
+                'ecological-flow costs are disabled when reward penalties are disabled',
             system_reward='0.5 * sum(local rewards) + 0.5 * global generation reward',
             critic='one centralized network: five mixed-return outputs plus one legacy-team diagnostic output',
             actor_advantages='own mixed-return GAE and own value output; normalize each channel independently',
@@ -280,19 +217,6 @@ def run_parallel_experiment(data,physical,config,args,*,runner_cls=CascadeReserv
             directories={str(seed):str(path.resolve()) for seed,path in checkpoint_dirs.items()},
             schedule='final completed update and every N updates if interval is positive',
             purpose='deterministic evaluation replay; training resume is not implemented'),
-        xld_dispatch_diagnostics=dict(enabled=xld_enabled, reservoir='XLD',
-            scope='every XLD day in the final scheduled periodic evaluation and final held-out evaluation only',
-            training_rows_written=False, files={str(seed):str(path.resolve()) for seed,path in xld_paths.items()},
-            daily_csv_enabled=bool(xld_paths), console_summary_enabled=xld_enabled,
-            expected_rows_per_seed=(3*PERIODIC_EVALUATION_DAYS+(0 if args.skip_final_evaluation else days))
-                if xld_paths else 0,
-            expected_observed_days_per_seed=(3*PERIODIC_EVALUATION_DAYS+(0 if args.skip_final_evaluation else days))
-                if xld_enabled else 0,
-            columns=list(XLD_DIAGNOSTIC_FIELDS),
-            counterfactual='same current state and action-date bounds; all other reservoir actions held fixed',
-            interpretation='same-day attainability under the executed terminal reachability constraints; '
-                'no action replacement or claim of long-term optimality',
-            data_precision='10 significant digits in CSV; internal calculations and JSON summaries retain full precision'),
         calendar='fixed consecutive daily steps with leap days retained; storage carries across source-year boundaries',
         release_bounds_scope=('episode_terminal_reachability' if physical.get(
             'terminal_storage_equal_initial', False) else 'current_transition'),
@@ -361,7 +285,6 @@ def run_parallel_experiment(data,physical,config,args,*,runner_cls=CascadeReserv
     with ExitStack() as outputs:
         stream=None
         daily_writers={}
-        xld_writers={}
         trajectory_writers={}
         credit_writers={}
         if args.episode_log is not None:
@@ -369,8 +292,6 @@ def run_parallel_experiment(data,physical,config,args,*,runner_cls=CascadeReserv
             stream=outputs.enter_context(args.episode_log.open('x',encoding='utf-8'))
             daily_writers={seed:StepMetricsWriter(outputs.enter_context(
                 path.open('x',encoding='utf-8',newline=''))) for seed,path in daily_paths.items()}
-            xld_writers={seed:XLDDispatchWriter(outputs.enter_context(
-                path.open('x',encoding='utf-8',newline=''))) for seed,path in xld_paths.items()}
             trajectory_writers={seed:outputs.enter_context(TrajectoryDiagnosticsWriter(path))
                                 for seed,path in trajectory_paths.items()}
             if credit_paths:
@@ -383,14 +304,12 @@ def run_parallel_experiment(data,physical,config,args,*,runner_cls=CascadeReserv
             credit_options={'counterfactual_log':credit_writers[seed]} if seed in credit_writers else {}
             runner=runner_cls(data,physical,config,seed,episode_log=stream,
                                           step_log=daily_writers.get(seed),periodic_windows=periodic_windows,
-                                          training_sampler=training_samplers[seed],xld_log=xld_writers.get(seed),
+                                          training_sampler=training_samplers[seed],
                                           trajectory_log=trajectory_writers.get(seed),
                                           checkpoint_dir=checkpoint_dirs.get(seed), **credit_options)
             runner.run(episodes,interval)
             runners.append(runner)
         evaluations=[] if args.skip_final_evaluation else [row for runner in runners for row in runner.final_evaluation()]
-        xld_summary=(_final_xld_summary(runners,evaluations,algorithm_name or 'happo',
-            args.skip_final_evaluation) if xld_enabled else None)
         result=dict(record_type='run_complete',seeds=config['experiment']['seeds'],
             episode_horizon_days=days,parallel_environments=count,episodes_per_seed=episodes,
             training_steps_per_seed=[runner.training_steps for runner in runners],
@@ -404,8 +323,6 @@ def run_parallel_experiment(data,physical,config,args,*,runner_cls=CascadeReserv
             policy_checkpoints=[checkpoint for runner in runners for checkpoint in runner.checkpoint_history],
             evaluation_skipped=bool(args.skip_final_evaluation),evaluations=evaluations,
             learning_objective=learning_objective)
-        if xld_summary is not None:
-            result['xld_dispatch_summary']=xld_summary
         log_episode(result,stream)
         payload=json.loads(json.dumps(dict(episode_horizon_days=days,gamma=config['algo']['gamma'],
             seeds=config['experiment']['seeds'],updates_per_seed=episodes//count,
@@ -414,8 +331,6 @@ def run_parallel_experiment(data,physical,config,args,*,runner_cls=CascadeReserv
             evaluation_histories=[runner.periodic_evaluation_history for runner in runners],
             algorithm=algorithm_name or 'happo',comparison_context=comparison_context,
             actor_architecture=actor_architecture,learning_objective=learning_objective),allow_nan=False))
-        if xld_summary is not None:
-            payload['xld_dispatch_summary']=xld_summary
         if not args.no_plot:
             plot_command=[args.plot_python,str(ROOT/'examples/plot_cascade_parallel.py')]
             if figure_paths:

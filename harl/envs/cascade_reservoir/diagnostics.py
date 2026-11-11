@@ -135,7 +135,7 @@ def after_update(runner, before):
         episode_penalty=runner.last_reward_metrics['episode_penalty'],
         episode_generation_reward=runner.last_reward_metrics['episode_generation_reward'],
         episode_penalty_components={key:runner.last_reward_metrics['episode_penalty_'+key]
-            for key in ('guaranteed_output','ecological_flow')},
+            for key in ('ecological_flow',)},
         episode_reward=accounting_reward,
         discounted_episode_reward=accounting_reward,
         episode_energy_TWh=runner.last_rollout['episode_energy_TWh'],

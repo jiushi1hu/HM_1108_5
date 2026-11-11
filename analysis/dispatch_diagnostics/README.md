@@ -1,83 +1,54 @@
-# Saved-policy dispatch investigation
+# Ecological-flow dispatch investigation
 
-This analysis evaluates the final saved actors without training or changing the
-baseline trajectory. It is kept outside `harl/` and `examples/` so adding an
-investigation does not invalidate the implementation fingerprints in checkpoints.
-
-Run from the repository root, using a **new** output directory:
+This analysis replays saved final policies without training or changing the
+baseline trajectory. It reconstructs full-precision physical transitions and
+examines same-state alternatives for ecological outlet flow.
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/private/tmp/happo_dispatch_mplconfig \
-  /opt/anaconda3/envs/harl/bin/python -B analysis/dispatch_diagnostics/analyze_run.py \
-  --run-log runs/happo_seeds123_20261103_154615.jsonl \
-  --output-dir runs/NEW_dispatch_analysis \
-  --report-python /Library/Frameworks/Python.framework/Versions/3.9/bin/python3
+python -B analysis/dispatch_diagnostics/analyze_run.py \
+  --run-log runs/EXPERIMENT.jsonl --output-dir runs/NEW_dispatch_analysis
 ```
 
-The original three training scenarios and the final held-out sequence are
-replayed for every saved seed. All configured discrete actions are evaluated for
-each violated reservoir/service, alongside exact piecewise continuous power
-maxima. Witnesses are checked through the complete cascade physics. Replayed
-energy, returns and per-reservoir violation counts must reproduce the original
-run log before the report can complete.
+The output directory must be new. Add `--report-python PATH` to use a separate
+interpreter with Matplotlib. Checkpoint source, configuration and data hashes
+must match; historical checkpoints require their matching source snapshot.
+No integrity check is relaxed by this analysis.
 
-The Python interpreter used for plotting can differ from the inference
-interpreter. No Matplotlib installation is required in the inference environment
-when `--report-python` points to an interpreter that already provides it.
-
-## Original experiment configuration
-
-The investigated run used service multipliers **1.0 / 1.0**. The working YAML was
-subsequently changed to **0.4 / 0.4**. The completed investigation therefore uses
-the exact source snapshot in
-`runs/happo_seeds123_20261103_154615_dispatch_reference_source/`: all 55 original
-implementation/configuration fingerprints are checked against the saved
-checkpoint. The sole differing source file, the environment YAML, was recovered
-from the matching Git HEAD bytes in that isolated copy. The working YAML is
-preserved, and no source-integrity check is relaxed.
-
-To reproduce that original experiment's diagnosis while retaining the newer
-working YAML, replace the analysis script path above with:
-
-```text
-runs/happo_seeds123_20261103_154615_dispatch_reference_source/analysis/dispatch_diagnostics/analyze_run.py
-```
-
-The source snapshot uses the checkpoint's original dataset location. The
-checkpoint loader checks all dataset fingerprints as usual.
+Final fixed training scenarios and any final held-out sequence are replayed for
+each selected seed. Replayed energy, returns and ecological violation counts
+must reproduce the original run log. For each violated reservoir, all configured
+commands are tested with other commands held fixed. Continuous release bounds
+identify the minimum release meeting the threshold and the maximum attainable
+release. Full-cascade witnesses preserve daily envelopes and hard terminal
+reachability. Generation, power and head remain ordinary physical metadata.
 
 ## Outputs
 
-- One `seedN_SCENARIO_dispatch.csv` per replay, with five reservoir records per
-  day: physical state, sampled commands, frozen critic values, realized returns,
-  service classifications and independently verified alternative actions.
-- `manifest.json`: checkpoint, source, dataset and analysis fingerprints, original
-  evaluation reconciliation, and scenario accounting.
-- `summary.json`: complete seed/scenario/reservoir/service, calendar-month and
-  source-episode-year aggregates; separate discounted/undiscounted accounting.
-- `report.md` and three PNGs: frequency/severity, classification composition and
-  seasonal violation rates. Fixed training scenarios and held-out results are
-  kept separate.
+- Per-scenario CSVs with five reservoir records per day, physical states,
+  commands, frozen values, returns, ecological classifications and witnesses.
+- `manifest.json` with source/data/checkpoint fingerprints and replay checks.
+- `summary.json` with ecological counts, severity, calendar-month and episode-year
+  aggregates, measured alternative deltas and separate reward accounting.
+- `report.md` and three PNGs: ecological frequency/severity, classification
+  composition and seasonal violation frequency.
 
 ## Interpretation
 
-`same_day_policy_alternative` means a different available command can meet that
-one service **from the saved starting state**, with other commands held fixed.
-It does not establish a better five-year strategy. Additional release, storage
-changes and changes to other stations' service counts are recorded explicitly.
+`same_day_policy_alternative` means another configured command meets the
+threshold from the saved starting state. `same_state_release_limit` means the
+maximum physically admissible release cannot meet it. Inactive thresholds and
+nonviolating days are counted separately. A quadratic grid can require more
+release than the continuous minimum; this quantization overshoot is recorded.
+Because the grid includes both feasible endpoints, it cannot miss an attainable
+one-sided ecological threshold entirely.
 
-`discrete_grid_gap` means only a continuous command can meet the requirement.
-Capacity/water/dispatch/head classifications describe restrictions in that same
-state and inflow condition. They do not prove that earlier coordinated decisions
-could not have produced a better state. Proof flags overlap; classification
-labels follow an ordered decision rule and are not independent causal factors.
+Alternatives for separate reservoirs/days are evaluated independently and cannot
+be combined into a cumulative intervention. An improved same-day ecological
+outcome does not establish a better long-horizon return. A release limit in the
+reached state does not prove earlier decisions could not have preserved water.
 
-Alternatives for separate days or reservoirs cannot be combined directly: every
-counterfactual starts from the original baseline state. Mean release/storage
-costs describe separate witnesses, not an executable cumulative intervention.
-
-Violation frequency, relative deficit severity, generation and service integrals
-are undiscounted. Reward accounting also retains the experiment's gamma. The
-global, system and legacy-team scalars repeat across five daily CSV records;
-the report counts each once per day. Mixed rewards remain reservoir-specific.
-Saved critic values are estimated mixed returns, not derivatives of water value.
+Ecological violation counts, deficit volumes and generation are undiscounted.
+Reward accounting retains gamma. Global, system and legacy scalar rewards repeat
+across five daily CSV records and are counted once per day; mixed rewards remain
+reservoir-specific. Saved critic values estimate returns rather than marginal
+water prices.

@@ -308,13 +308,14 @@ def _periodic(ax, algorithm, run, metric, percent=False):
 
 
 def make_figures(payload):
-    """Create three figures after validation, preserving five legacy metric axes."""
+    """Create training, evaluator-return and ecological-flow violation figures."""
     payload = validate_comparison(payload)
     import matplotlib.pyplot as plt
     from matplotlib.ticker import MaxNLocator
     training, training_axes = plt.subplots(1, 2, figsize=(13, 5), constrained_layout=True)
     evaluator, evaluator_ax = plt.subplots(figsize=(9, 5.5), constrained_layout=True)
-    violations, violation_axes = plt.subplots(1, 2, figsize=(13, 5), constrained_layout=True)
+    violations, violation_ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    violation_axes = (violation_ax,)
     for entry in payload['runs']:
         algorithm, run = entry['algorithm'], entry['payload']
         for ax, metric in zip(training_axes, ('episode_reward', 'episode_energy_TWh')):
@@ -330,7 +331,7 @@ def make_figures(payload):
                title='{}-day stochastic training episodes (in-sample)'.format(shared['episode_horizon_days']))
     evaluator_ax.set(ylabel='Legacy-team return (mean of three fixed training windows)',
                      title='Evaluator Return vs. Evaluation Round')
-    for ax, title in zip(violation_axes, ('Ecological-flow violation rate', 'Guaranteed-output violation rate')):
+    for ax, title in zip(violation_axes, ('Ecological-flow violation rate',)):
         ax.set(ylabel='Violation rate (%)', title=title)
     for ax in (evaluator_ax, *violation_axes):
         ax.set(xlabel='Evaluation round', xlim=(0, shared['episodes_per_seed']//shared['parallel_environments']))

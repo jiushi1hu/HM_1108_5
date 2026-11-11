@@ -17,7 +17,7 @@ from harl.envs.cascade_reservoir.training_sampler import SAMPLING_MODES, validat
 from harl.runners.cascade_reservoir_runner import (
     validate_gae_lambda, validate_seed, validate_credit_assignment)
 from examples.train_cascade_parallel import (
-    run_parallel_experiment, step_metrics_paths, plot_output_paths, xld_dispatch_paths,
+    run_parallel_experiment, step_metrics_paths, plot_output_paths,
     trajectory_diagnostics_paths, checkpoint_directories, counterfactual_credit_paths)
 
 
@@ -50,12 +50,8 @@ def main(argv=None, *, experiment_runner=run_parallel_experiment,
                         help='Actor credit: baseline shared team GAE or model-assisted one-step counterfactual Q differences')
     parser.add_argument('--counterfactual-batch-size',type=int,
                         help='Maximum candidate rows per batched physics/critic call (default: 4096)')
-    parser.add_argument('--guaranteed-output-violation-weight',type=float,
-                        help='Soft local reward cost per guaranteed-output violation; 0 restores relative-deficit-only costs')
     parser.add_argument('--ppo-epochs',type=int,help='Actor optimization epochs per collection round')
     parser.add_argument('--head-model',choices=HEAD_MODELS)
-    parser.add_argument('--guaranteed-output-scale',type=float,
-                        help='Positive multiplier for reference guaranteed-output thresholds; defaults to environment YAML, 1 restores reference values')
     parser.add_argument('--ecological-flow-scale',type=float,
                         help='Positive multiplier for reference ecological-flow thresholds; defaults to environment YAML, 1 restores reference values')
     limits = parser.add_mutually_exclusive_group()
@@ -77,8 +73,6 @@ def main(argv=None, *, experiment_runner=run_parallel_experiment,
                         help='Save final-policy actors, centralized critic and value normalization for evaluation replay; requires --episode-log')
     parser.add_argument('--checkpoint-interval',type=int,default=0,
                         help='Also save every N completed updates; 0 saves only the final policy; requires --save-checkpoints')
-    parser.add_argument('--xld-diagnostics',action='store_true',
-                        help='Diagnose final-policy XLD violations and print grouped summaries; with --episode-log also save daily diagnostic CSVs')
     parser.add_argument('--skip-final-evaluation',action='store_true',help='Reserve evaluation years during tuning')
     parser.add_argument('--episode-log',type=Path,
                         help='New summary JSONL path; also creates compact <stem>_seedN_steps.csv files')
@@ -122,15 +116,13 @@ def main(argv=None, *, experiment_runner=run_parallel_experiment,
         algo['counterfactual_batch_size'] = args.counterfactual_batch_size
     if args.head_model is not None:
         physical['head_model'] = args.head_model
-    for name in ('guaranteed_output_scale','ecological_flow_scale'):
+    for name in ('ecological_flow_scale',):
         value = getattr(args,name)
         if value is not None:
             physical[name] = value
     if args.daily_level_limits is not None:
         physical['use_daily_level_limits'] = args.daily_level_limits
     physical['reward_penalties'] = dict(physical.get('reward_penalties',{}))
-    if args.guaranteed_output_violation_weight is not None:
-        physical['reward_penalties']['guaranteed_output_violation_weight'] = args.guaranteed_output_violation_weight
     if args.reward_penalties is not None:
         physical['reward_penalties']['enabled'] = args.reward_penalties
     try:
@@ -164,7 +156,7 @@ def main(argv=None, *, experiment_runner=run_parallel_experiment,
                 raise ValueError(name+' must divide all collected daily transitions')
         if not isinstance(physical.get('use_daily_level_limits'),bool):
             raise ValueError('use_daily_level_limits must be a boolean')
-        for name in ('guaranteed_output_scale','ecological_flow_scale'):
+        for name in ('ecological_flow_scale',):
             physical[name] = validate_service_scale(physical.get(name,1.),name)
         reward_settings(physical)
         split = resolve_year_split(exp)
@@ -180,9 +172,6 @@ def main(argv=None, *, experiment_runner=run_parallel_experiment,
         for path in step_metrics_paths(args.episode_log,exp['seeds']).values():
             if path.exists():
                 parser.error('Daily metrics file already exists: '+str(path))
-        for path in xld_dispatch_paths(args.episode_log,exp['seeds'],args.xld_diagnostics).values():
-            if path.exists():
-                parser.error('XLD diagnostics file already exists: '+str(path))
         for path in trajectory_diagnostics_paths(args.episode_log,exp['seeds'],args.trajectory_diagnostics).values():
             if path.exists():
                 parser.error('Trajectory diagnostics file already exists: '+str(path))
@@ -201,7 +190,6 @@ def main(argv=None, *, experiment_runner=run_parallel_experiment,
     exp['trajectory_diagnostics'] = args.trajectory_diagnostics
     exp['save_checkpoints'] = args.save_checkpoints
     exp['checkpoint_interval'] = args.checkpoint_interval
-    exp['xld_diagnostics'] = args.xld_diagnostics
     data = CascadeData(args.data_dir,physical,exp)
     return experiment_runner(data,physical,config,args)
 

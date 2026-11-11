@@ -40,8 +40,7 @@ REPLAY_TRACE_FIELDS = (
     'next_state_level_lower_m', 'next_state_level_upper_m', 'balance_residual_m3',
     'local_generation_reward', 'local_reward_penalty', 'local_reward', 'global_reward',
     'mixed_reward', 'system_reward', 'legacy_team_reward',
-    'guaranteed_output_shortfall_MW', 'ecological_flow_shortfall_m3s',
-    'guaranteed_output_shortfall_MWh', 'ecological_flow_deficit_m3',
+    'ecological_flow_shortfall_m3s', 'ecological_flow_deficit_m3',
     'critic_reward_layout', 'value_channel', 'value_basis', 'learning_reward',
     'value', 'next_value', 'td_residual', 'realized_learning_reward_to_go',
     'replay_gae_target', 'replay_gae_advantage',
@@ -495,9 +494,7 @@ class FrozenCascadePolicy:
                     realized_shared_team_reward_to_go=0.,
                     legacy_team_value=None if team else float(values[-1]), realized_mixed_reward_to_go=0.,
                     realized_legacy_team_reward_to_go=0.,
-                    guaranteed_output_shortfall_MW=None if shortfalls is None else float(shortfalls['guaranteed_output'][i]),
                     ecological_flow_shortfall_m3s=None if shortfalls is None else float(shortfalls['ecological_flow'][i]),
-                    guaranteed_output_shortfall_MWh=None if integrals is None else float(integrals['guaranteed_output'][i]),
                     ecological_flow_deficit_m3=None if integrals is None else float(integrals['ecological_flow'][i]))
                 for field, source in (
                     ('storage_start_m3', 'storage_start'), ('storage_end_m3', 'storage_end'),

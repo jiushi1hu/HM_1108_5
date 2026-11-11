@@ -1,4 +1,4 @@
-"""Independent full-physics checks of investigation-only dispatch attribution."""
+"""Independent full-physics checks of ecological dispatch attribution."""
 import copy
 import json
 from pathlib import Path
@@ -20,8 +20,64 @@ from analysis.dispatch_diagnostics.feasibility import analyze_transition, Dispat
 from harl.envs.cascade_reservoir.data_loader import CascadeData, IDS
 from harl.envs.cascade_reservoir.episodes import episode_environment
 from harl.envs.cascade_reservoir.reservoir_physics import ReservoirPhysics
-from harl.envs.cascade_reservoir.xld_diagnostics import XLDDispatchDiagnostics
-from test_xld_dispatch_diagnostics import synthetic_dispatch
+from harl.envs.cascade_reservoir.reward import OperationReward, reward_settings
+
+
+def synthetic_dispatch(*, head_model='fixed', bins=200, available_water=30.,
+                       external=0., outlet=10000., turbine=10000., action=0,
+                       downstream_empty=False, ecology=0., reservoir=2):
+    """Actual cascade physics with a specified station's water and head curve."""
+    seconds = 86400.
+    maximum = np.full(5, seconds*10000.)
+    storage = np.full(5, seconds*5000.)
+    if head_model == 'storage_sensitivity':
+        maximum[reservoir] = seconds*100.
+        storage[reservoir] = maximum[reservoir]
+    else:
+        storage[reservoir] = seconds*available_water
+    if downstream_empty:
+        storage[reservoir+1] = 0.
+    anchors = {name: np.asarray([[0., 0.], [100., maximum[i]]])
+               for i, name in enumerate(IDS)}
+    data = SimpleNamespace(vmin=np.zeros(5), vmax=maximum,
+        release_cap=np.full(5, 10000.), turbine_cap=np.full(5, 10000.),
+        power_cap=np.full(5, 1e6), head=np.full(5, 100.), anchors=anchors,
+        head_sensitivity=None)
+    data.release_cap[reservoir], data.turbine_cap[reservoir] = outlet, turbine
+    data.levels = lambda values: np.asarray([
+        np.interp(values[i], anchors[name][:, 1], anchors[name][:, 0])
+        for i, name in enumerate(IDS)])
+    if head_model == 'storage_sensitivity':
+        slopes, references = np.zeros(5), np.full(5, 100.)
+        slopes[reservoir], references[reservoir] = 1., 10.
+        data.head_sensitivity = dict(efficiency=np.full(5, .9),
+            reference_net_head_m=references, head_slope_m_per_m=slopes,
+            assumed_reference_forebay_level_m=np.zeros(5))
+    requirements = SimpleNamespace(ecological_flow_m3s=np.zeros(5))
+    requirements.ecological_flow_m3s[reservoir] = ecology
+    data.service_requirements = requirements
+    config = dict(head_model=head_model, release_mapping='quadratic',
+        timestep_seconds=seconds, efficiency=.9, water_density_kg_m3=1000.,
+        gravity_m_s2=9.81, reward_penalties=dict(enabled=True, ecological_flow_weight=1.))
+    physics = ReservoirPhysics(data, config)
+    operation = OperationReward(data, reward_settings(config))
+    inflow = np.zeros(5)
+    inflow[reservoir] = external
+    indices = np.zeros(5, dtype=int)
+    indices[reservoir] = action
+    if downstream_empty:
+        indices[reservoir+1] = bins-1
+    transition = physics.transition(storage, inflow, indices/(bins-1), data.vmin, data.vmax)
+    transition.update(date='2000-01-01', sampled_actions=indices.copy(),
+        normalized_actions=transition['actions'].copy(), action_bins=bins,
+        timestep_seconds=seconds, levels_start=data.levels(storage),
+        levels_end=data.levels(transition['storage_end']))
+    transition['actions'] = np.where(transition['controls'] > 0., indices, 0).astype(int)
+    operation.apply(transition)
+    env = SimpleNamespace(data=data, physics=physics, operation_reward=operation,
+        action_bins=bins, storage=transition['storage_end'].copy(), index=1,
+        last_transition=transition)
+    return env, transition
 
 
 def brute_grid(env, row, reservoir):
@@ -36,62 +92,27 @@ def brute_grid(env, row, reservoir):
     return results
 
 
-def synthetic(i=2, **kwargs):
-    """Move the independently specified XLD fixture to any cascade station."""
-    ecology = kwargs.pop('ecology', 0.)
-    env, row = synthetic_dispatch(**kwargs)
-    if i != 2:
-        order = np.arange(5)
-        order[i], order[2] = order[2], order[i]
-        data = env.data
-        for name in ('vmin', 'vmax', 'release_cap', 'turbine_cap', 'power_cap', 'head'):
-            setattr(data, name, getattr(data, name)[order].copy())
-        original_anchors = data.anchors.copy()
-        data.anchors = {name:original_anchors[IDS[order[j]]].copy() for j,name in enumerate(IDS)}
-        data.levels = lambda values: np.asarray([
-            np.interp(values[j], data.anchors[name][:, 1], data.anchors[name][:, 0]) for j,name in enumerate(IDS)])
-        if data.head_sensitivity is not None:
-            data.head_sensitivity = {key:value[order].copy() for key,value in data.head_sensitivity.items()}
-        for name in ('guaranteed_output_mw', 'ecological_flow_m3s'):
-            setattr(data.service_requirements, name, getattr(data.service_requirements, name)[order].copy())
-        physics = ReservoirPhysics(data, env.physics.config)
-        storage, external, actions = (row[name][order].copy() for name in ('storage_start', 'external', 'sampled_actions'))
-        row = physics.transition(storage, external, actions/(env.action_bins-1), data.vmin, data.vmax)
-        row.update(date='2000-01-01', sampled_actions=actions, action_bins=env.action_bins,
-                   normalized_actions=row['actions'].copy())
-        row['actions'] = np.where(row['controls'] > 0., actions, 0)
-        env.physics = physics
-        env.storage = row['storage_end'].copy()
-        env.last_transition = row
-    env.data.service_requirements.ecological_flow_m3s[i] = ecology
-    return env, row
-
-
 class DispatchFeasibilityTest(unittest.TestCase):
     def test_historical_all_five_exact_grid_against_full_cascade(self):
         config = yaml.safe_load((ROOT/'harl/configs/envs_cfgs/cascade_reservoir.yaml').read_text())
-        experiment = yaml.safe_load((ROOT/'harl/configs/algos_cfgs/happo_cascade.yaml').read_text())['experiment']
         for head in ('fixed', 'storage_sensitivity'):
             physical = dict(config, head_model=head, terminal_storage_equal_initial=False)
-            data = CascadeData(ROOT/'data/cascade_reservoir_new', physical, experiment)
+            data = CascadeData(ROOT/'data/cascade_reservoir_new', physical)
             env = episode_environment(data, physical, [1965], days=4, action_bins=21)
-            # Diagnostic-only thresholds above actual capacities make every
-            # grid search observable; no source arrays or executed rewards change.
-            env.operation_reward.requirements = SimpleNamespace(
-                guaranteed_output_mw=np.full(5, 1e6), ecological_flow_m3s=np.full(5, 1e6))
+            env.operation_reward.requirements = SimpleNamespace(ecological_flow_m3s=np.full(5, 1e6))
             for day in range(4):
                 env.step(np.full(5, 20 if day == 0 else 0))
                 row = env.last_transition
                 records = analyze_transition(env, row)
-                self.assertEqual([r['reservoir_id'] for r in records], list(IDS))
+                self.assertEqual([record['reservoir_id'] for record in records], list(IDS))
                 for i, record in enumerate(records):
-                    expected = brute_grid(env, row, i)
-                    for term, source in (('guaranteed_output', 'power'), ('ecological_flow', 'release')):
-                        values = [float(r[source][i]) for r in expected]
-                        self.assertEqual(record[term+'_best_grid_action_index'], int(np.argmax(values)))
-                        np.testing.assert_allclose(record[term+'_best_grid_actual'], max(values), rtol=1e-10, atol=1e-7)
-                        self.assertEqual(record[term+'_meeting_grid_action_count'], 0)
-                    self.assertEqual(record['ecological_flow_classification'], 'same_state_capacity_limit')
+                    values = [float(candidate['release'][i]) for candidate in brute_grid(env, row, i)]
+                    self.assertEqual(record['ecological_flow_best_grid_action_index'], int(np.argmax(values)))
+                    np.testing.assert_allclose(record['ecological_flow_best_grid_actual'], max(values),
+                                               rtol=1e-10, atol=1e-7)
+                    self.assertEqual(record['ecological_flow_meeting_grid_action_count'], 0)
+                    self.assertEqual(record['ecological_flow_classification'], 'same_state_release_limit')
+                    self.assertTrue(record['ecological_flow_release_limit_proven'])
                 json.dumps(records, allow_nan=False)
 
     def test_terminal_reachability_is_preserved_by_diagnostic_witnesses(self):
@@ -100,85 +121,49 @@ class DispatchFeasibilityTest(unittest.TestCase):
         data = CascadeData(ROOT/'data/cascade_reservoir_new', physical)
         env = episode_environment(data, physical, [1965], days=4, action_bins=11)
         initial = env.storage.copy()
-        # Large diagnostic requirements exercise every alternative-search path;
-        # they do not change the terminal or physical constraints.
-        env.operation_reward.requirements = SimpleNamespace(
-            guaranteed_output_mw=np.full(5, 1e6), ecological_flow_m3s=np.full(5, 1e6))
-        xld = XLDDispatchDiagnostics(env, seed=1, evaluation_round=0,
-            window_id='terminal_reachability', phase='training_evaluation')
+        env.operation_reward.requirements = SimpleNamespace(ecological_flow_m3s=np.full(5, 1e6))
         for day in range(4):
             env.step((np.arange(5)*3+day*7) % env.action_bins)
             row = env.last_transition
-            self.assertIn('storage_constraints', row)
             records = analyze_transition(env, row)
-            xld_record = xld.update(row, day+1)
             for i, record in enumerate(records):
                 expected = brute_grid(env, row, i)
-                np.testing.assert_allclose(record['guaranteed_output_best_grid_actual'],
-                    max(float(candidate['power'][i]) for candidate in expected), rtol=1e-10, atol=1e-7)
+                np.testing.assert_allclose(record['ecological_flow_best_grid_actual'],
+                    max(float(candidate['release'][i]) for candidate in expected), rtol=1e-10, atol=1e-7)
                 for candidate in expected:
                     prefix = np.r_[0., np.cumsum(candidate['storage_end'])]
-                    self.assertTrue(np.all(prefix[:, None]-prefix[None, :] <=
-                                           row['storage_constraints']+1e-3))
+                    self.assertTrue(np.all(prefix[:, None]-prefix[None, :] <= row['storage_constraints']+1e-3))
                     if day == 3:
                         np.testing.assert_allclose(candidate['storage_end'], initial, rtol=0., atol=1e-3)
-            self.assertEqual(xld_record['classification'], records[2]['guaranteed_output_classification'])
-            self.assertAlmostEqual(xld_record['best_grid_power_mw'],
-                records[2]['guaranteed_output_best_grid_actual'], places=7)
         np.testing.assert_allclose(env.storage, initial, rtol=0., atol=1e-3)
 
-    def test_xld_equivalence_for_each_classification(self):
-        cases = [dict(guarantee=10.), dict(guarantee=100.),
-                 dict(guarantee=100., available_water=1000., outlet=30.),
-                 dict(guarantee=10., turbine=1.), dict(available_water=0.),
-                 dict(head_model='storage_sensitivity', external=100., guarantee=110., bins=2),
-                 dict(head_model='storage_sensitivity', external=100., guarantee=114., bins=200),
-                 dict(guarantee=0.)]
-        for kwargs in cases:
-            with self.subTest(kwargs=kwargs):
-                env, row = synthetic_dispatch(**kwargs)
-                old = XLDDispatchDiagnostics(env, seed=1, evaluation_round=1,
-                    window_id='equivalence', phase='training_evaluation').update(row, 1)
-                new = analyze_transition(env, row)[2]
-                self.assertEqual(new['guaranteed_output_classification'], old['classification'])
-                if old['violating']:
-                    self.assertEqual(new['guaranteed_output_best_grid_action_index'], old['best_grid_action_index'])
-                    self.assertAlmostEqual(new['guaranteed_output_best_grid_actual'], old['best_grid_power_mw'], places=8)
-                    self.assertAlmostEqual(new['guaranteed_output_continuous_max_actual'], old['continuous_max_power_mw'], places=8)
-                    self.assertEqual(new['guaranteed_output_minimum_meeting_action_index'], old['minimum_meeting_action_index'])
-
-    def test_all_station_nonmonotone_grid_gap_and_forced_cases(self):
+    def test_all_station_grid_quantization_and_forced_release_limits(self):
         for i in range(5):
             with self.subTest(reservoir=IDS[i]):
-                env, row = synthetic(i, head_model='storage_sensitivity', external=100.,
-                    guarantee=110., bins=2, ecology=150.)
+                env, row = synthetic_dispatch(reservoir=i, head_model='storage_sensitivity',
+                                              external=100., bins=3, ecology=150.)
                 record = analyze_transition(env, row)[i]
-                self.assertEqual(record['guaranteed_output_classification'], 'discrete_grid_gap')
                 self.assertEqual(record['ecological_flow_classification'], 'same_day_policy_alternative')
-                self.assertAlmostEqual(record['guaranteed_output_continuous_best_release_m3s'], 160., places=8)
-                self.assertAlmostEqual(record['guaranteed_output_continuous_max_actual'], .008829*160*80, places=8)
-                self.assertLess(record['guaranteed_output_continuous_minimum_meeting_release_m3s'], 160.)
+                self.assertEqual(record['ecological_flow_minimum_meeting_action_index'], 2)
                 self.assertAlmostEqual(record['ecological_flow_continuous_minimum_meeting_release_m3s'], 150., places=6)
-                self.assertEqual(record['ecological_flow_minimum_meeting_action_index'], 1)
+                self.assertAlmostEqual(record['ecological_flow_grid_overshoot_above_continuous_minimum_m3s'], 50.)
                 self.assertAlmostEqual(record['ecological_flow_meeting_end_storage_delta_m3'], -100.*86400.)
-                env, row = synthetic(i, available_water=0., ecology=1.)
+                env, row = synthetic_dispatch(reservoir=i, available_water=0., ecology=1.)
                 record = analyze_transition(env, row)[i]
                 self.assertTrue(record['forced_action'])
-                self.assertEqual(record['guaranteed_output_classification'], 'same_state_water_limit')
-                self.assertEqual(record['ecological_flow_classification'], 'same_state_water_limit')
+                self.assertEqual(record['ecological_flow_classification'], 'same_state_release_limit')
                 self.assertEqual(record['ecological_flow_continuous_max_actual'], 0.)
 
-    def test_original_downstream_sampled_action_and_observational_state(self):
-        env, row = synthetic_dispatch(downstream_empty=True)
-        env.data.service_requirements.ecological_flow_m3s[2] = 10.
+    def test_original_downstream_commands_and_observational_state(self):
+        env, row = synthetic_dispatch(downstream_empty=True, ecology=10.)
         original, storage = copy.deepcopy(row), env.storage.copy()
         numpy_state, python_state = np.random.get_state(), random.getstate()
         with mock.patch.object(env.physics, 'transition', wraps=env.physics.transition) as replay:
             records = analyze_transition(env, row)
         self.assertGreater(replay.call_count, 0)
         for call in replay.call_args_list:
-            # Only XLD has an active/violated service in this fixture.
-            np.testing.assert_array_equal(call.args[2][[0,1,3,4]], row['sampled_actions'][[0,1,3,4]]/(env.action_bins-1))
+            np.testing.assert_array_equal(call.args[2][[0,1,3,4]],
+                row['sampled_actions'][[0,1,3,4]]/(env.action_bins-1))
         for key in row:
             if isinstance(row[key], np.ndarray):
                 np.testing.assert_array_equal(row[key], original[key])
@@ -187,7 +172,7 @@ class DispatchFeasibilityTest(unittest.TestCase):
         self.assertEqual(env.index, 1)
         self.assertEqual(random.getstate(), python_state)
         np.testing.assert_array_equal(np.random.get_state()[1], numpy_state[1])
-        self.assertEqual(records[2]['guaranteed_output_classification'], 'same_day_policy_alternative')
+        self.assertEqual(records[2]['ecological_flow_classification'], 'same_day_policy_alternative')
         with mock.patch.object(env.physics, 'transition', side_effect=RuntimeError('broken counterfactual')):
             with self.assertRaises(DispatchDiagnosticError):
                 analyze_transition(env, row)
@@ -196,8 +181,8 @@ class DispatchFeasibilityTest(unittest.TestCase):
         with self.assertRaises(DispatchDiagnosticError):
             analyze_transition(env, invalid)
 
-    def test_ecological_dispatch_ceiling_and_monotone_storage_breaks(self):
-        env, original = synthetic(0, available_water=1000., guarantee=0., ecology=100.)
+    def test_downstream_storage_bounds_limit_ecological_release(self):
+        env, original = synthetic_dispatch(reservoir=0, available_water=1000., ecology=100.)
         data = env.data
         data.release_cap[1] = 30.
         storage = original['storage_start'].copy()
@@ -207,29 +192,17 @@ class DispatchFeasibilityTest(unittest.TestCase):
             original['sampled_actions']/(env.action_bins-1), data.vmin, data.vmax)
         row.update(date='2000-01-01', sampled_actions=original['sampled_actions'])
         record = analyze_transition(env, row)[0]
-        self.assertEqual(record['ecological_flow_classification'], 'same_state_dispatch_limit')
+        self.assertEqual(record['ecological_flow_classification'], 'same_state_release_limit')
         self.assertEqual(record['ecological_flow_continuous_max_actual'], 30.)
-        self.assertFalse(record['ecological_flow_water_limit_proven'])
 
-        env, original = synthetic(2, head_model='storage_sensitivity', external=100.,
-                                  guarantee=1e5, bins=31)
-        # A genuine interpolation kink creates separate quadratic power pieces.
-        env.data.anchors['XLD'] = np.array([[0., 0.], [35., 86400.*50.], [100., 86400.*100.]])
-        env.physics = ReservoirPhysics(env.data, env.physics.config)
-        row = env.physics.transition(original['storage_start'], original['external'],
-            original['sampled_actions']/(env.action_bins-1), env.data.vmin, env.data.vmax)
-        row.update(date='2000-01-01', sampled_actions=original['sampled_actions'])
-        record = analyze_transition(env, row)[2]
-        normalized = original['sampled_actions']/(env.action_bins-1)
-        dense = []
-        for action in np.linspace(0., 1., 1001):
-            commands = normalized.copy()
-            commands[2] = action
-            dense.append(env.physics.transition(row['storage_start'], row['external'],
-                commands, row['storage_lower_m3'], row['storage_upper_m3'],
-                storage_constraints=row.get('storage_constraints'))['power'][2])
-        self.assertGreaterEqual(record['guaranteed_output_continuous_max_actual']+1e-7, max(dense))
-        self.assertLess(record['guaranteed_output_continuous_max_actual']-max(dense), .01)
+    def test_inactive_and_satisfied_requirements_need_no_replays(self):
+        for ecology, action, classification in ((0., 0, 'requirement_inactive'),
+                (10., 199, 'no_violation')):
+            env, row = synthetic_dispatch(ecology=ecology, action=action)
+            with mock.patch.object(env.physics, 'transition', side_effect=AssertionError('unexpected replay')):
+                record = analyze_transition(env, row)[2]
+            self.assertEqual(record['ecological_flow_classification'], classification)
+            self.assertEqual(record['ecological_flow_shortfall'], 0.)
 
 
 if __name__ == '__main__':

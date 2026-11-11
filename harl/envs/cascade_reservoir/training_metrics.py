@@ -8,12 +8,11 @@ from harl.envs.cascade_reservoir.reward import PENALTY_TERMS, REWARD_AGGREGATION
 
 STEP_METRIC_FIELDS = (
     'phase', 'seed', 'episode', 'episode_step', 'date', 'training_steps',
-    'reward', 'generation_reward', 'guaranteed_output_penalty', 'ecological_flow_penalty',
-    'generation_MWh', 'guaranteed_output_shortfall_MW', 'guaranteed_output_shortfall_MWh',
+    'reward', 'generation_reward', 'ecological_flow_penalty', 'generation_MWh',
     'ecological_flow_shortfall_m3s', 'ecological_flow_deficit_m3',
 )
 _STEP_VALUE_FIELDS = STEP_METRIC_FIELDS[6:]
-_OPTIONAL_STEP_FIELDS = STEP_METRIC_FIELDS[11:]
+_OPTIONAL_STEP_FIELDS = ('ecological_flow_shortfall_m3s', 'ecological_flow_deficit_m3')
 
 
 def _step_integer(value, name, minimum=0):
@@ -60,14 +59,10 @@ def step_record(transition, *, seed, episode, episode_step, phase, training_step
         reward=_step_number(transition['reward'], 'reward'),
         generation_reward=_step_number(transition.get('generation_reward', transition['reward']),
                                        'generation_reward'),
-        guaranteed_output_penalty=_step_number(costs.get('guaranteed_output', 0.),
-                                               'guaranteed_output_penalty'),
         ecological_flow_penalty=_step_number(costs.get('ecological_flow', 0.),
                                              'ecological_flow_penalty'),
         generation_MWh=_step_sum(transition['energy'], 'generation_MWh'))
     measurements = (
-        ('guaranteed_output_shortfall_MW', 'service_shortfalls', 'guaranteed_output'),
-        ('guaranteed_output_shortfall_MWh', 'service_shortfall_integrals', 'guaranteed_output'),
         ('ecological_flow_shortfall_m3s', 'service_shortfalls', 'ecological_flow'),
         ('ecological_flow_deficit_m3', 'service_shortfall_integrals', 'ecological_flow'),
     )

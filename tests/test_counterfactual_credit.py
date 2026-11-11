@@ -40,8 +40,7 @@ class CounterfactualCreditTest(unittest.TestCase):
         for head in ('fixed', 'storage_sensitivity'):
             config = copy.deepcopy(physical)
             config['head_model'] = head
-            config['reward_penalties'].update(guaranteed_output_weight=.7,
-                ecological_flow_weight=.3, guaranteed_output_violation_weight=.8)
+            config['reward_penalties'].update(ecological_flow_weight=.3)
             data = CascadeData(ROOT/'data/cascade_reservoir_new', config, algorithm['experiment'])
             envs = [episode_environment(data, config, [year], 3, 5) for year in (1965, 1973)]
             records, snapshots, next_states = [], [], []
@@ -170,14 +169,13 @@ class CounterfactualCreditTest(unittest.TestCase):
     def test_vector_reward_handles_roundoff_inactive_services_and_disabled_penalties(self):
         fixture = self.fixtures['fixed']; data = fixture['env'].data
         requirements = copy.copy(data.service_requirements)
-        requirements.guaranteed_output_mw = np.array([100.,0.,100.,100.,100.])
         requirements.ecological_flow_m3s = np.array([10.,10.,0.,10.,10.])
         fake_data = copy.copy(data); fake_data.service_requirements = requirements
         power = np.array([[100.-1e-9, 0., 100.-1e-7, 80., 200.], [0.,0.,0.,0.,0.]])
         release = np.array([[10.,10.-1e-10,0.,0.,20.], [0.,0.,0.,0.,0.]])
         for enabled in (True, False):
             settings = reward_settings(dict(reward_penalties=dict(enabled=enabled,
-                guaranteed_output_weight=.7, ecological_flow_weight=.3, guaranteed_output_violation_weight=.8)))
+                ecological_flow_weight=.3)))
             reward = OperationReward(fake_data, settings)
             result = system_rewards_from_dispatch(reward, dict(power=power, release=release))
             for i in range(2):

@@ -34,118 +34,95 @@ from harl.runners.cascade_reservoir_runner import CascadeReservoirRunner
 from harl.runners.on_policy_ha_runner import OnPolicyHARunner
 
 
-class GuaranteedOutputFrequencyRewardTest(unittest.TestCase):
+class EcologicalRewardTest(unittest.TestCase):
     def setUp(self):
         self.data = SimpleNamespace(power_cap=np.full(5, 1000.),
             service_requirements=SimpleNamespace(
-                guaranteed_output_mw=np.array([100., 100., 100., 100., 0.]),
-                ecological_flow_m3s=np.full(5, 100.), metadata=lambda: {}))
+                ecological_flow_m3s=np.array([100., 100., 100., 100., 0.]), metadata=lambda: {}))
 
-    def transition(self, power, weight=None, enabled=True):
-        penalties = dict(enabled=enabled, guaranteed_output_weight=1., ecological_flow_weight=1.)
-        if weight is not None:
-            penalties['guaranteed_output_violation_weight'] = weight
-        settings = reward_settings(dict(reward_penalties=penalties))
-        power = np.asarray(power, dtype=np.float64)
-        result = dict(power=power.copy(), release=np.full(5, 100.),
-            reward=float(power.sum()/self.data.power_cap.sum()),
-            energy=24.*power, actions=np.arange(5),
-            storage_start=np.arange(5, dtype=float), storage_end=np.arange(5, dtype=float)+1.)
+    def transition(self, release, *, power=None, weight=1., enabled=True):
+        settings = reward_settings(dict(reward_penalties=dict(
+            enabled=enabled, ecological_flow_weight=weight)))
+        power = np.full(5, 100.) if power is None else np.asarray(power, dtype=np.float64)
+        result = dict(power=power.copy(), release=np.asarray(release, dtype=np.float64),
+            reward=float(power.sum()/self.data.power_cap.sum()), energy=24.*power,
+            actions=np.arange(5), storage_start=np.arange(5, dtype=float),
+            storage_end=np.arange(5, dtype=float)+1.)
         OperationReward(self.data, settings).apply(result)
         return result
 
-    def test_frequency_weight_is_optional_and_validated(self):
-        self.assertEqual(reward_settings({})['guaranteed_output_violation_weight'], 0.)
-        default = self.transition([90., 100., 100., 100., 0.])
-        zero = self.transition([90., 100., 100., 100., 0.], weight=0.)
-        for field in ('local_rewards', 'mixed_rewards', 'local_reward_penalties',
-                      'local_guaranteed_output_violation_penalties'):
-            np.testing.assert_array_equal(default[field], zero[field])
-        self.assertEqual(default['reward'], zero['reward'])
-        self.assertAlmostEqual(default['reward'], .053)
-        np.testing.assert_allclose(default['local_rewards'], [-.01, .1, .1, .1, 0.], atol=1e-15)
+    def test_ecological_weight_validation_and_single_penalty_schema(self):
+        self.assertEqual(reward_settings({}), dict(enabled=False, ecological_flow_weight=1.))
         for value in (-1., float('inf'), float('nan'), True, np.bool_(False), 'invalid'):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'finite and nonnegative'):
-                reward_settings(dict(reward_penalties=dict(guaranteed_output_violation_weight=value)))
-        self.assertEqual(reward_settings(dict(reward_penalties=dict(
-            guaranteed_output_violation_weight=1.25)))['guaranteed_output_violation_weight'], 1.25)
+                reward_settings(dict(reward_penalties=dict(ecological_flow_weight=value)))
+        row = self.transition([90., 100., 100., 100., 0.])
+        self.assertEqual(set(row['reward_penalty_components']), {'ecological_flow'})
+        self.assertEqual(set(row['local_reward_penalty_components']), {'ecological_flow'})
+        np.testing.assert_allclose(row['local_reward_penalties'], [.1, 0., 0., 0., 0.])
+        self.assertAlmostEqual(row['reward_penalty'], .1/4.)
+        self.assertAlmostEqual(row['reward'], .1-.1/4.)
 
-    def test_local_cost_preserves_physics_legacy_reward_and_service_counts(self):
-        power = [99.999, 50., 100., 150., 0.]
-        baseline, changed = self.transition(power, 0.), self.transition(power, 2.)
-        frequency = np.array([2., 2., 0., 0., 0.])
-        np.testing.assert_array_equal(changed['local_guaranteed_output_violation_penalties'], frequency)
-        np.testing.assert_allclose(changed['mixed_rewards'], baseline['mixed_rewards']-.5*frequency)
-        self.assertEqual(changed['global_reward'], baseline['global_reward'])
-        self.assertAlmostEqual(changed['system_reward'], baseline['system_reward']-.5*frequency.sum())
-        for field in ('reward', 'generation_reward', 'reward_penalty', 'reward_penalty_components'):
-            self.assertEqual(changed[field], baseline[field])
-        for field in ('power', 'release', 'energy', 'actions', 'storage_start', 'storage_end',
-                      'reward_penalty_by_reservoir'):
-            np.testing.assert_array_equal(changed[field], baseline[field])
-        for group in ('service_shortfalls', 'normalized_service_shortfalls', 'service_active_masks',
-                      'service_shortfall_integrals'):
-            for term in baseline[group]:
-                np.testing.assert_array_equal(changed[group][term], baseline[group][term])
-        before, after = EpisodeRewardMetrics(.5), EpisodeRewardMetrics(.5)
-        for _ in range(2):
-            before.update(baseline)
-            after.update(changed)
-        self.assertEqual(before.shortfall_summary(), after.shortfall_summary())
-        self.assertEqual(before.summary()['episode_reward'], after.summary()['episode_reward'])
-        learning = after.learning_summary()
-        np.testing.assert_array_equal(learning['episode_local_guaranteed_output_violation_penalties'],
-                                      1.5*frequency)
-        np.testing.assert_allclose(learning['episode_local_reward_penalties'],
-                                  np.sum(list(learning['episode_local_penalty_components'].values()), axis=0))
-        metadata = reward_metadata(self.data)
-        self.assertTrue(metadata['actor_reward_definition'].endswith('_v2'))
-        self.assertTrue(metadata['system_reward_definition'].endswith('_v2'))
-        self.assertEqual(metadata['reward_definition'], 'generation_minus_mean_service_shortfalls_v1')
+    def test_power_only_changes_generation_and_not_ecological_deficits(self):
+        release = [90., 100., 100., 100., 0.]
+        low = self.transition(release, power=np.zeros(5))
+        high = self.transition(release, power=np.full(5, 1000.))
+        self.assertEqual(low['reward_penalty'], high['reward_penalty'])
+        np.testing.assert_array_equal(low['local_reward_penalties'], high['local_reward_penalties'])
+        for field in ('service_shortfalls', 'normalized_service_shortfalls',
+                      'service_active_masks', 'service_shortfall_integrals'):
+            self.assertEqual(set(low[field]), {'ecological_flow'})
+            np.testing.assert_array_equal(low[field]['ecological_flow'], high[field]['ecological_flow'])
+        self.assertAlmostEqual(high['reward']-low['reward'], 1.)
+        compliant = self.transition([100., 100., 100., 100., 0.], power=np.zeros(5))
+        self.assertEqual(compliant['reward_penalty'], 0.)
 
-    def test_frequency_indicator_uses_existing_tolerance_and_inactive_requirements(self):
-        power = [100., 100.-2.5e-9, 100.-4.e-8, 101., 0.]
-        penalized = self.transition(power, 2.)
-        disabled = self.transition(power, 2., enabled=False)
-        np.testing.assert_array_equal(penalized['local_guaranteed_output_violation_penalties'],
-                                      [0., 0., 2., 0., 0.])
-        np.testing.assert_array_equal(disabled['local_guaranteed_output_violation_penalties'], np.zeros(5))
+    def test_tolerance_inactive_requirements_and_disabled_penalties(self):
+        release = [100., 100.-2.5e-9, 100.-4.e-8, 101., 0.]
+        enabled, disabled = self.transition(release), self.transition(release, enabled=False)
+        np.testing.assert_array_equal(enabled['service_shortfalls']['ecological_flow'] > 0.,
+                                      [False, False, True, False, False])
         np.testing.assert_array_equal(disabled['local_reward_penalties'], np.zeros(5))
-        enabled_metrics, disabled_metrics = EpisodeRewardMetrics(1.), EpisodeRewardMetrics(1.)
-        enabled_metrics.update(penalized)
-        disabled_metrics.update(disabled)
-        self.assertEqual(enabled_metrics.shortfall_summary(), disabled_metrics.shortfall_summary())
-        guarantee = enabled_metrics.shortfall_summary()['guaranteed_output']
-        self.assertEqual(guarantee['reservoir_day_count'], 1)
-        self.assertEqual(guarantee['active_reservoir_days'], 4)
-        unavailable = SimpleNamespace(power_cap=self.data.power_cap, service_requirements=None)
-        transition = dict(power=np.ones(5), reward=.001)
-        OperationReward(unavailable, reward_settings(dict(reward_penalties=dict(
-            enabled=False, guaranteed_output_violation_weight=2.)))).apply(transition)
-        np.testing.assert_array_equal(transition['local_guaranteed_output_violation_penalties'], np.zeros(5))
+        before, after = EpisodeRewardMetrics(1.), EpisodeRewardMetrics(1.)
+        before.update(enabled)
+        after.update(disabled)
+        self.assertEqual(before.shortfall_summary(), after.shortfall_summary())
+        ecological = before.shortfall_summary()['ecological_flow']
+        self.assertEqual(ecological['reservoir_day_count'], 1)
+        self.assertEqual(ecological['active_reservoir_days'], 4)
+        self.assertAlmostEqual(ecological['reservoir_day_rate'], .25)
 
-    def test_equal_total_deficit_is_distinguished_by_violation_frequency(self):
+    def test_discounted_penalty_and_undiscounted_deficit_volume(self):
+        row = self.transition([90., 100., 100., 100., 0.], weight=2.)
+        metrics = EpisodeRewardMetrics(.5)
+        metrics.update(row)
+        metrics.update(row)
+        summary = metrics.summary(detailed=True)
+        self.assertAlmostEqual(summary['episode_penalty_ecological_flow'], 1.5*.2/4.)
+        self.assertEqual(set(summary['service_shortfalls']), {'ecological_flow'})
+        self.assertEqual(summary['service_shortfalls']['ecological_flow']['deficit_volume_m3'], 2.*10.*86400.)
+        self.assertTrue(reward_metadata(self.data)['actor_reward_definition'].endswith('_v3'))
+
+    def test_equal_total_ecological_deficit_has_equal_cost(self):
         fewer, more = EpisodeRewardMetrics(1.), EpisodeRewardMetrics(1.)
-        for metric, powers in ((fewer, (90., 100.)), (more, (95., 95.))):
-            for power in powers:
-                metric.update(self.transition([power, 100., 100., 100., 0.], 2.))
+        for metrics, releases in ((fewer, (90., 100.)), (more, (95., 95.))):
+            for release in releases:
+                metrics.update(self.transition([release, 100., 100., 100., 0.]))
         self.assertAlmostEqual(fewer.summary()['episode_reward'], more.summary()['episode_reward'])
-        self.assertEqual(fewer.shortfall_summary()['guaranteed_output']['reservoir_day_count'], 1)
-        self.assertEqual(more.shortfall_summary()['guaranteed_output']['reservoir_day_count'], 2)
-        self.assertAlmostEqual(fewer.learning_summary()['episode_mixed_rewards'][0]-
-                               more.learning_summary()['episode_mixed_rewards'][0], 1.)
+        np.testing.assert_allclose(fewer.learning_summary()['episode_mixed_rewards'],
+                                   more.learning_summary()['episode_mixed_rewards'])
+        self.assertEqual(fewer.shortfall_summary()['ecological_flow']['reservoir_day_count'], 1)
+        self.assertEqual(more.shortfall_summary()['ecological_flow']['reservoir_day_count'], 2)
 
     def test_shared_team_reward_counts_global_generation_once(self):
-        row = self.transition([90., 100., 100., 100., 0.], weight=2.)
-        # Own local rewards are (-2.01, .1, .1, .1, 0), with global=.078.
-        # This is one common team reward, not the sum of five mixed rewards.
-        self.assertAlmostEqual(row['system_reward'], -.816)
-        self.assertAlmostEqual(float(row['mixed_rewards'].sum()), -.660)
+        row = self.transition([90., 100., 100., 100., 0.], power=[90., 100., 100., 100., 0.])
+        self.assertAlmostEqual(row['system_reward'], .184)
+        self.assertAlmostEqual(float(row['mixed_rewards'].sum()), .34)
         self.assertAlmostEqual(row['reward'], .053)
         selected = CascadeReservoirRunner._critic_rewards(
             SimpleNamespace(critic_reward_layout='shared_team'), [row])
         self.assertEqual(selected.shape, (1, 1))
-        np.testing.assert_allclose(selected, [[-.816]], rtol=1e-7)
+        np.testing.assert_allclose(selected, [[.184]], rtol=1e-7)
 
 
 class SharedTeamAdvantageTest(unittest.TestCase):

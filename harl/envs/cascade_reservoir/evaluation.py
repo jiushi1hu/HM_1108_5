@@ -39,7 +39,7 @@ class DailyLimitMetrics:
             max_daily_bound_excess_m3=self.max_bound_excess)
 
 
-def _attach_evaluation_progress(error, env, rewards, energy, xld_metrics=None):
+def _attach_evaluation_progress(error, env, rewards, energy):
     """Preserve executed-day accounting when a physical evaluation step fails.
 
     The exception type and normal final-evaluation failure behavior are retained.
@@ -57,26 +57,19 @@ def _attach_evaluation_progress(error, env, rewards, energy, xld_metrics=None):
             system_evaluator_return=totals['episode_system_reward'],
             global_evaluator_return=totals['episode_global_reward'],
             generation_MWh=float(energy), generation_TWh=float(energy/1e6),
-            guaranteed_output_penalty=totals['episode_penalty_guaranteed_output'],
             ecological_flow_penalty=totals['episode_penalty_ecological_flow']))
-    if xld_metrics is not None:
-        error.evaluation_progress['xld_dispatch_diagnostics'] = xld_metrics.summary()
 
 
 @torch.no_grad()
 def evaluate_policy(actors, data, physical_config, seed, episode, training_steps, *,
                     gamma, source_years, episode_days=DEFAULT_EPISODE_DAYS,
-                    deterministic=True, diagnostics=False, step_log=None,
-                    xld_log=None, evaluation_round=None, window_id=None,
-                    xld_diagnostics=False):
+                    deterministic=True, diagnostics=False, step_log=None):
     """Evaluate one complete multi-year sequence without collecting training samples.
 
     Evaluation years are used only after training. A training-only diagnostic
     may explicitly supply training years; mixed split sequences are rejected.
     Source dates and daily level limits are preserved at representative-year joins.
     """
-    if not isinstance(xld_diagnostics, bool):
-        raise ValueError('xld_diagnostics must be a boolean')
     gamma = validate_discount_factor(gamma)
     if len(actors) != len(IDS):
         raise ValueError('Evaluation requires one actor per reservoir')
@@ -94,13 +87,6 @@ def evaluate_policy(actors, data, physical_config, seed, episode, training_steps
     initial = env.storage.copy()
     limit_metrics = DailyLimitMetrics(env)
     reward_metrics = EpisodeRewardMetrics(gamma)
-    xld_metrics = None
-    if xld_diagnostics or xld_log is not None:
-        from harl.envs.cascade_reservoir.xld_diagnostics import XLDDispatchDiagnostics
-        xld_metrics = XLDDispatchDiagnostics(env, xld_log, seed=seed,
-            evaluation_round=episode if evaluation_round is None else evaluation_round,
-            window_id=window_id or ('held_out_sequence' if phase == 'evaluation' else
-                                   'training_window_'+str(used_years[0])), phase=phase)
     energy, spill, residual = 0., 0., 0.
     energy_by_reservoir, spill_by_reservoir = np.zeros(5), np.zeros(5)
     action_sum, mapped_sum, active_count = np.zeros(5), np.zeros(5), np.zeros(5)
@@ -114,7 +100,7 @@ def evaluate_policy(actors, data, physical_config, seed, episode, training_steps
         try:
             env.step(np.asarray(actions))
         except InfeasibleCascade as exc:
-            _attach_evaluation_progress(exc, env, reward_metrics, energy, xld_metrics)
+            _attach_evaluation_progress(exc, env, reward_metrics, energy)
             raise
         row = env.last_transition
         if step_log is not None:
@@ -126,8 +112,6 @@ def evaluate_policy(actors, data, physical_config, seed, episode, training_steps
         spill += float(row['spill'].sum()*env.physics.dt)
         residual = max(residual, float(np.abs(row['residual']).max()))
         limit_metrics.update()
-        if xld_metrics is not None:
-            xld_metrics.update(row, env.index-env.start)
         if diagnostics:
             energy_by_reservoir += row['energy']
             spill_by_reservoir += row['spill']*env.physics.dt
@@ -152,12 +136,10 @@ def evaluate_policy(actors, data, physical_config, seed, episode, training_steps
     try:
         result.update(limit_metrics.finish())
     except InfeasibleCascade as exc:
-        _attach_evaluation_progress(exc, env, reward_metrics, energy, xld_metrics)
+        _attach_evaluation_progress(exc, env, reward_metrics, energy)
         raise
     result.update(reward_metrics.summary(detailed=True), **reward_metadata(data),
         reward_penalties=env.reward_settings, reward_aggregation=REWARD_AGGREGATION)
-    if xld_metrics is not None:
-        result['xld_dispatch_diagnostics'] = xld_metrics.summary()
     if diagnostics:
         result.update(energy_by_reservoir_TWh=(energy_by_reservoir/1e6).tolist(),
             spill_by_reservoir_billion_m3=(spill_by_reservoir/1e9).tolist(),

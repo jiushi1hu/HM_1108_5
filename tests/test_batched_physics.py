@@ -15,7 +15,7 @@ from harl.envs.cascade_reservoir.batched_physics import batched_transition
 from harl.envs.cascade_reservoir.data_loader import CascadeData
 from harl.envs.cascade_reservoir.episodes import episode_environment
 from harl.envs.cascade_reservoir.reservoir_physics import InfeasibleCascade
-from test_xld_dispatch_diagnostics import synthetic_dispatch
+from test_dispatch_feasibility import synthetic_dispatch
 
 
 class BatchedPhysicsTest(unittest.TestCase):

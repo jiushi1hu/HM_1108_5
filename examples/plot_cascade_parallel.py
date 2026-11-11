@@ -7,7 +7,7 @@ import sys
 import numpy as np
 
 
-VIOLATION_TERMS = ('ecological_flow', 'guaranteed_output')
+VIOLATION_TERMS = ('ecological_flow',)
 VIOLATION_SUFFIXES = ('violation_rate', 'violation_count', 'active_reservoir_days')
 
 
@@ -372,9 +372,9 @@ def make_violation_figure(payload):
     seeds, histories, grids = periodic_histories(payload)
     if not violation_metrics_available(payload):
         raise ValueError('This log does not contain periodic violation counts; violation rates cannot be reconstructed from penalty values')
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5), constrained_layout=True)
-    titles = ('Ecological-flow violation rate', 'Guaranteed-output violation rate')
-    for ax, term, title in zip(axes, VIOLATION_TERMS, titles):
+    fig, axes = plt.subplots(1, 1, figsize=(9, 5), squeeze=False, constrained_layout=True)
+    titles = ('Ecological-flow violation rate',)
+    for ax, term, title in zip(axes.ravel(), VIOLATION_TERMS, titles):
         field = term+'_violation_rate'
         values = [np.asarray([np.nan if row[field] is None else 100.*float(row[field])
                               for row in rows]) for rows in histories]
@@ -399,7 +399,7 @@ def main():
     parser.add_argument('--episode-log', type=Path, help='Read saved JSONL collector and periodic evaluator summaries')
     parser.add_argument('--output', type=Path, help='Save collector curves and derive evaluator/violation figure paths from this stem')
     parser.add_argument('--evaluator-output', type=Path, help='Explicit output path for the separate evaluator figure')
-    parser.add_argument('--violations-output', type=Path, help='Explicit output path for ecological-flow and guaranteed-output violation rates')
+    parser.add_argument('--violations-output', type=Path, help='Explicit output path for ecological-flow violation rates')
     parser.add_argument('--no-show', action='store_true', help='Save without opening an interactive window')
     args = parser.parse_args()
     if args.no_show and all(path is None for path in (args.output, args.evaluator_output, args.violations_output)):

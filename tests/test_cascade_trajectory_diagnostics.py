@@ -94,9 +94,9 @@ def fixture(days=16, gamma=.9, shared=True):
             row['local_generation_rewards'] = vector+1.
             row['local_reward_penalties'] = np.ones(5)
             row['local_reward_penalty_components'] = {
-                'guaranteed_output': np.full(5, .25), 'ecological_flow': np.full(5, .75)}
-            row['service_shortfalls'] = {'guaranteed_output': np.ones(5), 'ecological_flow': np.zeros(5)}
-            row['service_shortfall_integrals'] = {'guaranteed_output': np.full(5, 24.), 'ecological_flow': np.zeros(5)}
+                'ecological_flow': np.ones(5)}
+            row['service_shortfalls'] = {'ecological_flow': np.zeros(5)}
+            row['service_shortfall_integrals'] = {'ecological_flow': np.zeros(5)}
             rows.append(row)
         transitions.append(rows)
     return runner, before, factors, transitions
@@ -159,7 +159,7 @@ class TrajectoryDiagnosticsTest(unittest.TestCase):
             with TrajectoryDiagnosticsWriter(path) as writer:
                 capture(writer, transitions)
                 transitions[0][0]['release'][:] = -999.
-                transitions[0][0]['local_reward_penalty_components']['guaranteed_output'][:] = 999.
+                transitions[0][0]['local_reward_penalty_components']['ecological_flow'][:] = 999.
                 summary = writer.write_batch(runner, before, factors)
                 self.assertEqual(len(writer._transitions), 0)
                 self.assertIsNone(writer._batch)
@@ -168,7 +168,7 @@ class TrajectoryDiagnosticsTest(unittest.TestCase):
         self.assertEqual(len(rows), 16*2*5)
         first = rows[0]
         self.assertEqual(float(first['release_m3s']), 0.)
-        self.assertEqual(float(first['local_guaranteed_output_penalty']), .25)
+        self.assertEqual(float(first['local_ecological_flow_penalty']), 1.)
         self.assertEqual(first['forced_action'], '1')
         self.assertEqual(first['sampled_action_index'], '3')
         self.assertEqual(first['effective_action_index'], '0')
@@ -274,8 +274,7 @@ class TrajectoryDiagnosticsTest(unittest.TestCase):
         runner.completed_episodes, runner.update_count, runner.training_steps = 2, 1, 6
         runner.value_normalizer = None
         runner.last_reward_metrics = dict(episode_reward=-123., episode_penalty=2.,
-            episode_generation_reward=10., episode_penalty_guaranteed_output=1.,
-            episode_penalty_ecological_flow=1.)
+            episode_generation_reward=10., episode_penalty_ecological_flow=2.)
         runner.last_rollout = dict(episode_energy_TWh=1.)
         runner.critic_buffer.share_obs = np.zeros((4, 2, 38), dtype=np.float32)
         runner.critic = SimpleNamespace(critic=torch.nn.Linear(1, 1),
@@ -315,7 +314,7 @@ class TrajectoryDiagnosticsTest(unittest.TestCase):
         selected = raw[runner.actor_buffer[0].active_masks[:-1,...,0] > 0.]
         for row in rows:
             t, lane = int(row['episode_step'])-1, int(row['parallel_env_index'])
-            self.assertEqual(row['guaranteed_output_shortfall_MW'], '')
+            self.assertEqual(row['ecological_flow_shortfall_m3s'], '')
             self.assertEqual(float(row['legacy_generation_reward']), 10.)
             self.assertEqual(float(row['episode_time_weight']), 1.)
             self.assertEqual(float(row['policy_objective_weight']),

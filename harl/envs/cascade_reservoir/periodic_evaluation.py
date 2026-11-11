@@ -15,11 +15,11 @@ from harl.envs.cascade_reservoir.reward import REWARD_AGGREGATION, validate_disc
 
 PERIODIC_EVALUATION_DAYS = 1825
 _SCALAR_METRICS = ('evaluator_return', 'generation_MWh', 'generation_TWh',
-                   'guaranteed_output_penalty', 'ecological_flow_penalty',
+                   'ecological_flow_penalty',
                    'system_evaluator_return', 'global_evaluator_return')
 _VECTOR_METRICS = ('final_storage_m3', 'final_level_m',
                    'mixed_evaluator_returns', 'local_evaluator_returns')
-_VIOLATION_TERMS = ('guaranteed_output', 'ecological_flow')
+_VIOLATION_TERMS = ('ecological_flow',)
 _VIOLATION_METRICS = tuple(term+suffix for term in _VIOLATION_TERMS
     for suffix in ('_violation_rate', '_violation_count', '_active_reservoir_days'))
 
@@ -135,8 +135,7 @@ def _preserve_training_state(actors):
 
 
 def evaluate_periodic_policy(actors, data, physical_config, *, seed, evaluation_round,
-                             training_steps, windows, gamma, xld_log=None,
-                             xld_diagnostics=False):
+                             training_steps, windows, gamma):
     """Measure a frozen policy on all three scenarios without changing training.
 
     Each scenario gets a newly reset environment and deterministic argmax
@@ -145,9 +144,6 @@ def evaluate_periodic_policy(actors, data, physical_config, *, seed, evaluation_
     Programming/configuration errors propagate instead of masquerading as
     hydrological infeasibility. No evaluation rows enter training buffers.
     """
-    if not isinstance(xld_diagnostics, bool):
-        raise ValueError('xld_diagnostics must be a boolean')
-    xld_enabled = xld_diagnostics or xld_log is not None
     if (isinstance(evaluation_round, (bool, np.bool_)) or
             not isinstance(evaluation_round, (int, np.integer)) or evaluation_round < 0):
         raise ValueError('evaluation_round must be a nonnegative integer')
@@ -165,9 +161,7 @@ def evaluate_periodic_policy(actors, data, physical_config, *, seed, evaluation_
                 measured = evaluate_policy(actors, data, physical_config, seed=int(seed),
                     episode=int(evaluation_round), training_steps=int(training_steps),
                     gamma=gamma, source_years=window['source_years'],
-                    episode_days=window['episode_horizon_days'], deterministic=True,
-                    xld_log=xld_log, evaluation_round=int(evaluation_round),
-                    window_id=window['window_id'], xld_diagnostics=xld_diagnostics)
+                    episode_days=window['episode_horizon_days'], deterministic=True)
             except InfeasibleCascade as exc:
                 progress = getattr(exc, 'evaluation_progress', {})
                 result.update(status='failed', failure=dict(error_type=type(exc).__name__,
@@ -179,8 +173,6 @@ def evaluate_periodic_policy(actors, data, physical_config, *, seed, evaluation_
                 result.update({metric:None for metric in
                                _SCALAR_METRICS+_VECTOR_METRICS+_VIOLATION_METRICS})
                 result['service_shortfalls'] = None
-                if xld_enabled:
-                    result['partial_xld_dispatch_diagnostics'] = progress.get('xld_dispatch_diagnostics')
             else:
                 final_storage = [measured[name+'_end_m3'] for name in IDS]
                 result.update(evaluator_return=measured['episode_reward'],
@@ -189,7 +181,6 @@ def evaluate_periodic_policy(actors, data, physical_config, *, seed, evaluation_
                     mixed_evaluator_returns=measured['episode_mixed_rewards'],
                     local_evaluator_returns=measured['episode_local_rewards'],
                     generation_MWh=measured['energy_MWh'], generation_TWh=measured['energy_TWh'],
-                    guaranteed_output_penalty=measured['episode_penalty_guaranteed_output'],
                     ecological_flow_penalty=measured['episode_penalty_ecological_flow'],
                     final_storage_m3=final_storage,
                     final_level_m=data.levels(final_storage).tolist(),
@@ -198,8 +189,6 @@ def evaluate_periodic_policy(actors, data, physical_config, *, seed, evaluation_
                     max_daily_bound_excess_m3=measured['max_daily_bound_excess_m3'],
                     service_shortfalls=measured['service_shortfalls'])
                 result.update(_violation_metrics(measured['service_shortfalls']))
-                if 'xld_dispatch_diagnostics' in measured:
-                    result['xld_dispatch_diagnostics'] = measured['xld_dispatch_diagnostics']
             individual.append(result)
     successes = sum(row['status'] == 'ok' for row in individual)
     record = dict(record_type='periodic_evaluation', phase='training_evaluation',
@@ -223,24 +212,4 @@ def evaluate_periodic_policy(actors, data, physical_config, *, seed, evaluation_
         eligible = sum(row[eligible_key] for row in individual) if successes == 3 else None
         record.update({count_key:count, eligible_key:eligible,
                        term+'_violation_rate':count/eligible if eligible else None})
-    if xld_enabled or any('xld_dispatch_diagnostics' in row for row in individual):
-        complete = [row['status'] == 'ok' and
-                    isinstance(row.get('xld_dispatch_diagnostics'), dict) and
-                    row['xld_dispatch_diagnostics'].get('completed_steps') == row['episode_horizon_days']
-                    for row in individual]
-        if all(complete):
-            from harl.envs.cascade_reservoir.xld_diagnostics import aggregate_xld_summaries
-            record['xld_dispatch_diagnostics'] = aggregate_xld_summaries(
-                [dict(row['xld_dispatch_diagnostics'], status='ok',
-                      episode_horizon_days=row['episode_horizon_days']) for row in individual])
-        else:
-            record['xld_dispatch_diagnostics'] = None
-            record['partial_xld_dispatch_diagnostics'] = dict(status='incomplete',
-                expected_window_count=len(individual), complete_window_count=sum(complete),
-                aggregation='No pooled diagnostic is reported unless every requested window is complete.',
-                windows=[dict(window_id=row['window_id'], status=row['status'],
-                    episode_horizon_days=row['episode_horizon_days'],
-                    summary=row.get('xld_dispatch_diagnostics',
-                                    row.get('partial_xld_dispatch_diagnostics')))
-                    for row in individual])
     return record

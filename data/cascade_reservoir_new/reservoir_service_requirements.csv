@@ -1,6 +1,6 @@
-reservoir_id,paper_reservoir_id,guaranteed_output_mw,ecological_flow_m3s
-WDD,WDD,2290.0,900.0
-BHT,BHT,4567.5,1160.0
-XLD,XLD,5345.7,1160.0
-XJB,XJB,2750.0,1200.0
-THR,TGR,4990.0,6000.0
+reservoir_id,paper_reservoir_id,ecological_flow_m3s
+WDD,WDD,900.0
+BHT,BHT,1160.0
+XLD,XLD,1160.0
+XJB,XJB,1200.0
+THR,TGR,6000.0

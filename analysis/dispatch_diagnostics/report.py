@@ -14,20 +14,18 @@ from pathlib import Path
 import textwrap
 
 
-TERMS = ('guaranteed_output', 'ecological_flow')
+TERMS = ('ecological_flow',)
 RESERVOIRS = ('WDD', 'BHT', 'XLD', 'XJB', 'THR')
 _ALIASES = {
     'reservoir_id': ('reservoir_id', 'reservoir'),
     'power_mw': ('power_mw', 'power_MW'),
     'energy_mwh': ('energy_mwh', 'energy_MWh', 'generation_MWh'),
-    'guaranteed_output_shortfall': ('guaranteed_output_shortfall',
-        'guaranteed_output_shortfall_mw', 'guaranteed_output_shortfall_MW'),
     'ecological_flow_shortfall': ('ecological_flow_shortfall', 'ecological_flow_shortfall_m3s'),
 }
 _CONTEXT = ('seed', 'window_id', 'phase', 'reservoir_id', 'term')
 _PHASE_LABELS = {'training_evaluation': 'Fixed training scenarios',
                  'evaluation': 'Held-out representative-year sequence'}
-_UNITS = {'guaranteed_output': 'MW', 'ecological_flow': 'm³/s'}
+_UNITS = {'ecological_flow': 'm³/s'}
 
 
 def _value(row, name, default=None):
@@ -170,7 +168,7 @@ def _observe(row, term):
         dt = _number(_value(row, 'timestep_seconds'), 'timestep_seconds')
         if dt <= 0.:
             raise ValueError('timestep_seconds must be positive')
-        integral = shortfall*dt/(3600. if term == 'guaranteed_output' else 1.)
+        integral = shortfall*dt
     if integral < 0.:
         raise ValueError('Shortfall integrals must be nonnegative')
     context = {key:_number(_value(row, key), key, optional=True) for key in
@@ -180,20 +178,15 @@ def _observe(row, term):
     if low is not None and high is not None and context['storage_end_m3'] is not None and high > low:
         context['end_storage_position_within_daily_bounds'] = (context['storage_end_m3']-low)/(high-low)
     proofs = {name:_flag(_value(row, term+'_'+name), term+'_'+name, False)
-              for name in ('water_limit_proven', 'dispatch_limit_proven', 'capacity_limit_proven')}
-    head_flag = _flag(_value(row, term+'_head_contribution_at_executed_release',
-                            _value(row, 'head_contribution_at_executed_release')),
-                      'head_contribution_at_executed_release', False)
-    if term == 'guaranteed_output':
-        proofs['head_contribution_at_executed_release'] = head_flag
+              for name in ('release_limit_proven',)}
     meeting = _number(_value(row, term+'_meeting_grid_action_count'), 'meeting_grid_action_count', optional=True)
     alternative = {name:_number(_value(row, term+'_'+name), term+'_'+name, optional=True) for name in
                    ('meeting_release_delta_m3s', 'meeting_end_storage_delta_m3',
                     'minimum_meeting_other_end_storage_delta_m3',
-                    'minimum_meeting_other_guaranteed_violations',
-                    'minimum_meeting_other_ecological_violations')}
+                    'minimum_meeting_other_ecological_violations',
+                    'grid_overshoot_above_continuous_minimum_m3s')}
     harm = {}
-    for other_term, name in (('guaranteed_output', 'guaranteed'), ('ecological_flow', 'ecological')):
+    for other_term, name in (('ecological_flow', 'ecological'),):
         actual = _number(_value(row, term+'_actual_other_'+name+'_violations',
                                _value(row, 'actual_other_'+name+'_violations')),
                          'actual other violations', optional=True)
@@ -315,7 +308,7 @@ def aggregate_rows(rows_or_csv_paths, metadata=None):
             mean_relative_shortfall_all_active_days='sum(shortfall / effective threshold) / active reservoir-days; undiscounted',
             conditional_severity='mean physical shortfall on violating days only',
             classification_fractions='classification count / actual violation count; no-violation/inactive rows excluded',
-            shortfall_integral_units={'guaranteed_output':'MWh', 'ecological_flow':'m3'},
+            shortfall_integral_units={'ecological_flow':'m3'},
             daily_storage_position='(end storage - action-date lower bound) / (action-date upper - lower); not global active-storage fraction',
             alternatives='only violating states with a meeting discrete action; deltas refer to the minimum-meeting same-day candidate',
             same_state_residual_severity='sum of continuous minimum achievable deficits / sum of actual deficits in saved violating states; '
@@ -363,7 +356,7 @@ def _markdown(result):
         'their denominator; they are not percentages of all days.', '',
         'A meeting same-state action establishes same-day reachability under the tested mapping '
         'and fixed other commands. A physical-limit classification applies to that starting state; '
-        'it does not prove that earlier policy decisions could not have preserved more water or head. '
+        'it does not prove that earlier policy decisions could not have preserved more water. '
         'Proof flags can overlap and must not be summed as disjoint causes.', '',
         'The alternative release/storage deltas do not price future water value. Positive release '
         'deltas generally draw additional water; negative end-storage deltas indicate lower ending '
@@ -437,7 +430,7 @@ def _plots(result, output):
     phases = sorted({r['phase'] for r in result['by_phase_reservoir']})
     reservoirs = [r for r in RESERVOIRS if any(x['reservoir_id'] == r for x in result['by_phase_reservoir'])]
     lookup = {(r['phase'],r['reservoir_id'],r['term']):r for r in result['by_phase_reservoir']}
-    fig, axes = plt.subplots(len(phases),2,figsize=(14,4.5*len(phases)),squeeze=False,constrained_layout=True)
+    fig, axes = plt.subplots(len(phases),len(TERMS),figsize=(9,4.5*len(phases)),squeeze=False,constrained_layout=True)
     for j,phase in enumerate(phases):
         for k,term in enumerate(TERMS):
             ax = axes[j,k]
@@ -454,7 +447,7 @@ def _plots(result, output):
 
     labels = sorted({label for r in result['by_phase_reservoir'] for label in r['classification_counts']})
     colors = {label:plt.get_cmap('tab20')(i/max(len(labels)-1,1)) for i,label in enumerate(labels)}
-    fig, axes = plt.subplots(len(phases),2,figsize=(16,5*len(phases)+1.5),squeeze=False)
+    fig, axes = plt.subplots(len(phases),len(TERMS),figsize=(9,5*len(phases)+1.5),squeeze=False)
     handles = {}
     for j,phase in enumerate(phases):
         for k,term in enumerate(TERMS):
@@ -481,7 +474,7 @@ def _plots(result, output):
     for r in result['by_month']:
         key = (r['phase'],r['reservoir_id'],r['term'],r['calendar_month'])
         monthly[key][0] += r['violation_count'];monthly[key][1] += r['active_reservoir_days']
-    fig, axes = plt.subplots(len(phases),2,figsize=(14,4.5*len(phases)),squeeze=False,constrained_layout=True)
+    fig, axes = plt.subplots(len(phases),len(TERMS),figsize=(9,4.5*len(phases)),squeeze=False,constrained_layout=True)
     for j,phase in enumerate(phases):
         for k,term in enumerate(TERMS):
             ax = axes[j,k]

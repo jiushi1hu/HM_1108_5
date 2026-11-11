@@ -31,8 +31,6 @@ _PHYSICAL_COLUMNS = {
     'local_reward': 'local_rewards', 'mixed_reward': 'mixed_rewards',
 }
 _SERVICE_COLUMNS = {
-    'guaranteed_output_shortfall_MW': ('service_shortfalls', 'guaranteed_output'),
-    'guaranteed_output_shortfall_MWh': ('service_shortfall_integrals', 'guaranteed_output'),
     'ecological_flow_shortfall_m3s': ('service_shortfalls', 'ecological_flow'),
     'ecological_flow_deficit_m3': ('service_shortfall_integrals', 'ecological_flow'),
 }
@@ -41,7 +39,7 @@ TRAJECTORY_DIAGNOSTIC_FIELDS = (
     'seed', 'update', 'episode', 'parallel_env_index', 'window_start_year',
     'source_years', 'episode_step', 'date', 'reservoir_id', 'value_channel',
     *_PHYSICAL_COLUMNS,
-    'local_guaranteed_output_penalty', 'local_ecological_flow_penalty',
+    'local_ecological_flow_penalty',
     *_SERVICE_COLUMNS, 'global_reward', 'system_reward', 'legacy_team_reward',
     'legacy_generation_reward', 'sampled_action_index', 'effective_action_index',
     'action_bins', 'forced_action', 'sampled_action_probability',
@@ -218,7 +216,7 @@ class TrajectoryDiagnosticsWriter:
             for column, (group, term) in _SERVICE_COLUMNS.items():
                 value = transition.get(group, {}).get(term)
                 row[column] = None if value is None else _array(value, (len(IDS),), column).copy()
-            for term in ('guaranteed_output', 'ecological_flow'):
+            for term in ('ecological_flow',):
                 row['local_'+term+'_penalty'] = _array(
                     transition['local_reward_penalty_components'][term], (len(IDS),), term).copy()
             row.update({key:_number(transition.get(key, transition['reward'])
@@ -341,7 +339,7 @@ class TrajectoryDiagnosticsWriter:
                     row.update({name:float(transition[source][i]) for name,source in _PHYSICAL_COLUMNS.items()})
                     row.update({name:None if transition[name] is None else float(transition[name][i])
                                 for name in _SERVICE_COLUMNS})
-                    for term in ('guaranteed_output', 'ecological_flow'):
+                    for term in ('ecological_flow',):
                         key = 'local_'+term+'_penalty'
                         row[key] = float(transition[key][i])
                     row.update(global_reward=transition['global_reward'], system_reward=transition['system_reward'],

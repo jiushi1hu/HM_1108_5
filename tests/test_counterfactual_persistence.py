@@ -31,7 +31,7 @@ class CounterfactualPersistenceTest(unittest.TestCase):
         config['algo'].update(ppo_epoch=1,critic_epoch=1,happo_credit_assignment='counterfactual',
                               counterfactual_batch_size=13)
         config['experiment'].update(episodes=2,seeds=[1],diagnostics=True,trajectory_diagnostics=True,
-                                    save_checkpoints=True,checkpoint_interval=1,xld_diagnostics=False)
+                                    save_checkpoints=True,checkpoint_interval=1)
         data = CascadeData(ROOT/'data/cascade_reservoir_new',physical,config['experiment'])
         windows = select_periodic_windows(data,episode_days=2)
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):

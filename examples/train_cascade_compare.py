@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
 from examples.train_cascade import main as cascade_main
 from examples.train_cascade_parallel import (
     run_parallel_experiment, step_metrics_paths, plot_output_paths,
-    xld_dispatch_paths, trajectory_diagnostics_paths, checkpoint_directories,
+    trajectory_diagnostics_paths, checkpoint_directories,
     counterfactual_credit_paths)
 from examples.plot_cascade_compare import validate_comparison
 from harl.runners.cascade_reservoir_runner import CascadeReservoirRunner
@@ -67,7 +67,6 @@ def comparison_preflight(args, config):
         if log is not None:
             paths.append(log)
         paths.extend(step_metrics_paths(log, seeds).values())
-        paths.extend(xld_dispatch_paths(log, seeds, args.xld_diagnostics).values())
         paths.extend(trajectory_diagnostics_paths(log, seeds, args.trajectory_diagnostics).values())
         paths.extend(checkpoint_directories(log, seeds, args.save_checkpoints).values())
         paths.extend(counterfactual_credit_paths(log, seeds, counterfactual).values())

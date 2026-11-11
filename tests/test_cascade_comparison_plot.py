@@ -47,7 +47,7 @@ def evaluation(seed, number, value, count=1, failed=False):
     for descriptor in descriptors():
         row = dict(descriptor, status='failed' if failed else 'ok',
                    evaluator_return=None if failed else value)
-        for term in ('guaranteed_output', 'ecological_flow'):
+        for term in ('ecological_flow',):
             row.update({term+'_violation_count': None if failed else count,
                         term+'_active_reservoir_days': None if failed else 10,
                         term+'_violation_rate': None if failed else count/10.})
@@ -56,7 +56,7 @@ def evaluation(seed, number, value, count=1, failed=False):
                status='failed' if failed else 'ok', window_count=3,
                successful_window_count=0 if failed else 3,
                evaluator_return=None if failed else value, windows=windows)
-    for term in ('guaranteed_output', 'ecological_flow'):
+    for term in ('ecological_flow',):
         row.update({term+'_violation_count': None if failed else 3*count,
                     term+'_active_reservoir_days': None if failed else 30,
                     term+'_violation_rate': None if failed else count/10.})
@@ -111,12 +111,12 @@ class ComparisonFigureTest(unittest.TestCase):
         for figure in figures.values():
             self.assertIn('Different learning objectives', figure._suptitle.get_text())
         np.testing.assert_allclose(figures['training'].axes[0].lines[0].get_ydata(), [3.5, 5.5])
-        np.testing.assert_allclose(figures['violations'].axes[1].lines[1].get_ydata(), [15., 15., 15.])
+        np.testing.assert_allclose(figures['violations'].axes[0].lines[1].get_ydata(), [15., 15., 15.])
 
     def test_joint_figures_keep_seeds_within_algorithm(self):
         figures = compare.make_figures(payload())
         self.assertEqual(set(figures), {'training', 'evaluator', 'violations'})
-        self.assertEqual([len(f.axes) for f in figures.values()], [2, 1, 2])
+        self.assertEqual([len(f.axes) for f in figures.values()], [2, 1, 1])
         for figure in figures.values():
             for ax in figure.axes:
                 self.assertEqual(len(ax.lines), 2)
@@ -143,7 +143,7 @@ class ComparisonFigureTest(unittest.TestCase):
                 figures = compare.make_figures(data)
                 self.assertTrue(np.isnan(figures['evaluator'].axes[0].lines[0].get_ydata()[1]))
                 self.assertTrue(np.isfinite(figures['evaluator'].axes[0].lines[1].get_ydata()[1]))
-                self.assertTrue(np.isnan(figures['violations'].axes[1].lines[0].get_ydata()[1]))
+                self.assertTrue(np.isnan(figures['violations'].axes[0].lines[0].get_ydata()[1]))
 
     def test_mismatch_is_rejected_before_drawing(self):
         for change in ('hash', 'physical', 'gamma', 'scenarios'):

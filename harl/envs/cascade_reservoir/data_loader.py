@@ -128,7 +128,7 @@ class CascadeData:
         self.root = Path(root).resolve()
         self.service_requirement_scales = {
             term: validate_service_scale(config.get(term + '_scale', 1.), term + '_scale')
-            for term in ('guaranteed_output', 'ecological_flow')}
+            for term in ('ecological_flow',)}
         self.head_model = config.get("head_model", "fixed")
         if self.head_model not in HEAD_MODELS:
             raise ValueError("Unknown head model: " + str(self.head_model))
@@ -331,8 +331,7 @@ class ServiceRequirementsData:
         path = data.root / SERVICE_REQUIREMENTS_FILE
         if not path.is_file():
             raise ValueError("Service requirements require " + str(path))
-        required = ("reservoir_id", "paper_reservoir_id", "guaranteed_output_mw",
-                    "ecological_flow_m3s")
+        required = ("reservoir_id", "paper_reservoir_id", "ecological_flow_m3s")
         with path.open(encoding="utf-8-sig", newline="") as stream:
             reader = csv.DictReader(stream)
             headers = reader.fieldnames or []
@@ -355,9 +354,8 @@ class ServiceRequirementsData:
         self.threshold_scales = {
             term: validate_service_scale(getattr(data, 'service_requirement_scales', {}).get(term, 1.),
                                          term + '_scale')
-            for term in ('guaranteed_output', 'ecological_flow')}
-        for term, field, cap in (("guaranteed_output", "guaranteed_output_mw", data.power_cap),
-                                ("ecological_flow", "ecological_flow_m3s", data.release_cap)):
+            for term in ('ecological_flow',)}
+        for term, field, cap in (("ecological_flow", "ecological_flow_m3s", data.release_cap),):
             try:
                 base = np.array([float(records[name][field]) for name in IDS], dtype=np.float64)
             except (TypeError, ValueError, OverflowError) as exc:
@@ -381,9 +379,7 @@ class ServiceRequirementsData:
         """Return JSON-compatible values and the input hash without exposing arrays."""
         return dict(file=SERVICE_REQUIREMENTS_FILE, sha256=self.sha256,
                     reservoir_ids=list(IDS), paper_reservoir_ids=list(self.paper_reservoir_ids),
-                    guaranteed_output_mw=self.guaranteed_output_mw.tolist(),
                     ecological_flow_m3s=self.ecological_flow_m3s.tolist(),
-                    base_guaranteed_output_mw=self.base_guaranteed_output_mw.tolist(),
                     base_ecological_flow_m3s=self.base_ecological_flow_m3s.tolist(),
                     threshold_scales=dict(self.threshold_scales),
                     time_basis="constant_daily_requirement", source_value_status="paper_reported",

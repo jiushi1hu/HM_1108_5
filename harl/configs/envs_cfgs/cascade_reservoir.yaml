@@ -17,17 +17,12 @@ release_mapping: quadratic
 terminal_storage_equal_initial: true
 # Supplied permitted levels for the state reached after each action date.
 use_daily_level_limits: true
-# Reference guaranteed-output and ecological-flow thresholds from paper Table A.1.
+# Reference ecological-flow thresholds from paper Table A.1.
 load_service_requirements: true
-# Current sensitivity experiment: both requirements are 40% of the reference.
-# Each multiplier applies directly to the original CSV; use 1 to restore reference values.
-guaranteed_output_scale: 1 #保证出力
+# Applies directly to the source CSV; 1 uses the reference values.
 ecological_flow_scale: 1 #生态流量
 # Requirement-relative shortfalls averaged over each fixed active reservoir set.
 # Unit weights are prespecified tradeoffs, not calibrated or monetary costs.
 reward_penalties:
   enabled: true
-  guaranteed_output_weight: 1.0
   ecological_flow_weight: 1.0
-  # Learning-only frequency cost; service constraints remain soft.
-  guaranteed_output_violation_weight: 1.0

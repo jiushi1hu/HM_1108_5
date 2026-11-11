@@ -2,13 +2,13 @@
 import numpy as np
 from harl.envs.cascade_reservoir.data_loader import IDS
 
-PENALTY_TERMS = ('guaranteed_output', 'ecological_flow')
-REWARD_DEFINITION = 'generation_minus_mean_service_shortfalls_v1'
+PENALTY_TERMS = ('ecological_flow',)
+REWARD_DEFINITION = 'generation_minus_mean_ecological_shortfall_v2'
 LOCAL_GLOBAL_ALPHA = 0.5
-ACTOR_REWARD_DEFINITION = 'half_local_reward_with_guaranteed_output_frequency_cost_plus_half_global_generation_v2'
-SYSTEM_REWARD_DEFINITION = 'half_sum_local_rewards_with_guaranteed_output_frequency_cost_plus_half_global_generation_v2'
-SHORTFALL_UNITS = dict(guaranteed_output='MW', ecological_flow='m3/s')
-INTEGRAL_FIELDS = dict(guaranteed_output='shortfall_energy_MWh', ecological_flow='deficit_volume_m3')
+ACTOR_REWARD_DEFINITION = 'half_local_ecological_reward_plus_half_global_generation_v3'
+SYSTEM_REWARD_DEFINITION = 'half_sum_local_ecological_rewards_plus_half_global_generation_v3'
+SHORTFALL_UNITS = dict(ecological_flow='m3/s')
+INTEGRAL_FIELDS = dict(ecological_flow='deficit_volume_m3')
 REWARD_AGGREGATION = 'sum(gamma**t * daily_reward), t=0 at episode start'
 
 
@@ -18,8 +18,6 @@ def reward_metadata(data):
                 actor_reward_definition=ACTOR_REWARD_DEFINITION,
                 system_reward_definition=SYSTEM_REWARD_DEFINITION,
                 local_global_alpha=LOCAL_GLOBAL_ALPHA,
-                guaranteed_output_violation_cost_scope='own_local_reward_before_local_global_mixing',
-                guaranteed_output_violation_indicator='tolerance_filtered_guaranteed_output_shortfall > 0',
                 service_requirements=None if requirements is None else requirements.metadata())
 
 
@@ -43,7 +41,6 @@ def reward_settings(config):
     if not isinstance(raw, dict):
         raise ValueError('reward_penalties must be a mapping')
     defaults = {term+'_weight': 1. for term in PENALTY_TERMS}
-    defaults['guaranteed_output_violation_weight'] = 0.
     allowed = {'enabled'} | set(defaults)
     if set(raw)-allowed:
         raise ValueError('Unknown reward_penalties settings: '+str(sorted(map(str,set(raw)-allowed))))
@@ -72,10 +69,8 @@ class OperationReward:
     reservoir's requirement; means use the fixed active set, never just the
     violating reservoirs. Those means belong only to the legacy team metric;
     local learning penalties use each reservoir's own relative deficits.
-    An optional local-only frequency cost uses the same tolerance-filtered
-    guaranteed-output violation indicator as the physical counts. It changes
-    neither the legacy team reward nor the requirements or shortfall metrics.
-    Seasonality does not gate these service penalties.
+    Ecological outlet flow is the sole soft constraint. Seasonality does not
+    gate its penalty, and it never imposes a hard release floor.
     """
 
     def __init__(self, data, settings, timestep_seconds=86400.):
@@ -94,8 +89,7 @@ class OperationReward:
         if not np.isfinite(self.dt) or self.dt <= 0.:
             raise ValueError('Service shortfall accounting requires a positive time step')
         if self.requirements is not None:
-            self.thresholds = dict(guaranteed_output=np.array(self.requirements.guaranteed_output_mw),
-                                   ecological_flow=np.array(self.requirements.ecological_flow_m3s))
+            self.thresholds = dict(ecological_flow=np.array(self.requirements.ecological_flow_m3s))
             if any(v.shape != (len(IDS),) or not np.isfinite(v).all() or (v < 0.).any()
                    for v in self.thresholds.values()):
                 raise ValueError('Service requirements must be finite nonnegative five-vectors')
@@ -104,11 +98,10 @@ class OperationReward:
         if self.requirements is None:
             self._apply_local_global(transition, {k: np.zeros(len(IDS)) for k in PENALTY_TERMS})
             return
-        actual = dict(guaranteed_output=np.asarray(transition['power']),
-                      ecological_flow=np.asarray(transition['release']))
+        actual = dict(ecological_flow=np.asarray(transition['release']))
         if any(v.shape != (len(IDS),) or not np.isfinite(v).all() or (v < 0.).any()
                for v in actual.values()):
-            raise ValueError('Service reward requires actual finite nonnegative power and release')
+            raise ValueError('Ecological reward requires actual finite nonnegative release')
         active = {k: threshold > 0. for k, threshold in self.thresholds.items()}
         excess, normalized, by_reservoir = {}, {}, {}
         for k, threshold in self.thresholds.items():
@@ -127,20 +120,15 @@ class OperationReward:
         transition.update(generation_reward=generation_reward, reward=reward, reward_penalty=penalty,
             reward_penalty_components=costs, service_shortfalls=excess,
             normalized_service_shortfalls=normalized, service_active_masks=active,
-            service_shortfall_integrals=dict(guaranteed_output=excess['guaranteed_output']*self.dt/3600.,
-                                            ecological_flow=excess['ecological_flow']*self.dt),
+            service_shortfall_integrals=dict(ecological_flow=excess['ecological_flow']*self.dt),
             reward_penalty_by_reservoir=sum(by_reservoir.values()))
         local_costs = {
             k: (self.settings[k+'_weight'] if self.settings['enabled'] else 0.)*normalized[k]
             for k in PENALTY_TERMS}
-        violation_weight = (self.settings.get('guaranteed_output_violation_weight', 0.)
-                            if self.settings['enabled'] else 0.)
-        violation_penalties = violation_weight*(excess['guaranteed_output'] > 0.)
-        local_costs['guaranteed_output'] += violation_penalties
-        self._apply_local_global(transition, local_costs, violation_penalties)
+        self._apply_local_global(transition, local_costs)
 
-    def _apply_local_global(self, transition, local_costs, violation_penalties=None):
-        """Local/global mixing, including the optional local frequency cost.
+    def _apply_local_global(self, transition, local_costs):
+        """Mix local generation/ecology reward with global generation.
 
         The existing settings and effective service thresholds are reused. No
         navigation or action-correction penalty is introduced. Global generation
@@ -160,8 +148,6 @@ class OperationReward:
             raise FloatingPointError('Non-finite local/global reward')
         transition.update(local_generation_rewards=local_generation,
             local_reward_penalties=local_penalties, local_reward_penalty_components=local_costs,
-            local_guaranteed_output_violation_penalties=(np.zeros(len(IDS)) if violation_penalties is None
-                                                         else violation_penalties.copy()),
             local_rewards=local, global_reward=global_reward, mixed_rewards=mixed,
             system_reward=system)
 
@@ -181,7 +167,6 @@ class EpisodeRewardMetrics:
         self.global_reward = self.system_reward = 0.
         self.local_generation_rewards = np.zeros(len(IDS))
         self.local_reward_penalties = np.zeros(len(IDS))
-        self.local_guaranteed_output_violation_penalties = np.zeros(len(IDS))
         self.local_rewards = np.zeros(len(IDS))
         self.mixed_rewards = np.zeros(len(IDS))
         self.local_penalty_components = {k: np.zeros(len(IDS)) for k in PENALTY_TERMS}
@@ -209,12 +194,6 @@ class EpisodeRewardMetrics:
                 if value.shape != (len(IDS),) or not np.isfinite(value).all():
                     raise ValueError('Local/global episode accounting requires finite five-vector '+name)
                 setattr(self, name, getattr(self, name)+self.discount*value)
-            violation_penalties = np.asarray(transition.get('local_guaranteed_output_violation_penalties',
-                                                           np.zeros(len(IDS))), dtype=np.float64)
-            if (violation_penalties.shape != (len(IDS),) or not np.isfinite(violation_penalties).all()
-                    or (violation_penalties < 0.).any()):
-                raise ValueError('Local guarantee-frequency penalties must be a finite nonnegative five-vector')
-            self.local_guaranteed_output_violation_penalties += self.discount*violation_penalties
             global_reward, system_reward = float(transition['global_reward']), float(transition['system_reward'])
             expected_mixed = (LOCAL_GLOBAL_ALPHA*np.asarray(transition['local_rewards'])+
                               (1.-LOCAL_GLOBAL_ALPHA)*global_reward)
@@ -260,7 +239,6 @@ class EpisodeRewardMetrics:
             episode_global_reward=self.global_reward, episode_system_reward=self.system_reward,
             episode_local_generation_rewards=self.local_generation_rewards.tolist(),
             episode_local_reward_penalties=self.local_reward_penalties.tolist(),
-            episode_local_guaranteed_output_violation_penalties=self.local_guaranteed_output_violation_penalties.tolist(),
             episode_local_rewards=self.local_rewards.tolist(), episode_mixed_rewards=self.mixed_rewards.tolist(),
             episode_local_penalty_components={k: v.tolist() for k, v in self.local_penalty_components.items()})
 
